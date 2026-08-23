@@ -20,8 +20,27 @@ next-env.d.ts
 # ---------------------------------------------------------------------------
 # Environment files
 #
-# Only .env.example is tracked. Every other env file is local-only and may
-# contain live Appwrite / Plaid / Dwolla credentials.
+#   .env.local    <- YOUR REAL CREDENTIALS GO HERE. Ignored. Never committed.
+#   .env.example  <- TRACKED TEMPLATE. Placeholders only. Never a real value.
+#
+# The two names look alike and it is easy to type credentials into the wrong
+# one. If you are pasting a secret, the file must be .env.local.
+#
+# What lives in .env.local for this project:
+#   NEXT_PUBLIC_APPWRITE_ENDPOINT   regional, e.g. https://fra.cloud.appwrite.io/v1
+#   NEXT_PUBLIC_APPWRITE_PROJECT    public by design (ships in the browser bundle)
+#   NEXT_APPWRITE_KEY               ROOT CREDENTIAL - bypasses every Appwrite
+#                                   permission rule. Rotate if it ever leaves
+#                                   this file.
+#   APPWRITE_*_COLLECTION_ID        chosen by you via "Custom ID" when creating
+#   PLAID_CLIENT_ID / PLAID_SECRET  use the SANDBOX secret, not development or
+#                                   production - all three look identical
+#   DWOLLA_KEY / DWOLLA_SECRET      from dashboard-sandbox.dwolla.com
+#   DWOLLA_ENV                      exactly "sandbox" or "production"; any other
+#                                   value throws at module load
+#
+# Anything named NEXT_PUBLIC_* is inlined into the browser bundle and is public.
+# Never rename a secret to NEXT_PUBLIC_* to "make it work" on the client.
 # ---------------------------------------------------------------------------
 .env
 .env.local
