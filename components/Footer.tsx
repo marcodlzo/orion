@@ -1,3 +1,9 @@
+'use client';
+
+// Uses useRouter and an onClick handler, so this is a client component. It
+// previously had no directive and worked only because Sidebar and MobileNav
+// (both client components) import it — the boundary was inherited rather than
+// declared. Importing it from a server component would have broken it.
 import { logoutAccount } from '@/lib/actions/user.actions'
 import Image from 'next/image'
 import { useRouter } from 'next/navigation'

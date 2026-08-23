@@ -89,17 +89,18 @@ vi.mock("../appwrite", () => ({
 }));
 
 vi.mock("../plaid", () => ({ plaidClient: {} }));
-vi.mock("./dwolla.actions", () => ({
+// Dwolla's non-client-facing operations moved to lib/server/dwolla.ts when the
+// server-action surface was shrunk; only the mock path changes.
+vi.mock("../server/dwolla", () => ({
   addFundingSource: vi.fn(),
   createDwollaCustomer: vi.fn(),
 }));
 
-import {
-  getBank,
-  getBankByAccountId,
-  getBanks,
-  getUserInfo,
-} from "./user.actions";
+// getBank and getBankByAccountId remain server actions — they are called from
+// PaymentTransferForm. getBanks and getUserInfo were never client-called and
+// are now internal server-only modules. Behaviour of all four is unchanged.
+import { getBank, getBankByAccountId } from "./user.actions";
+import { getBanks, getUserInfo } from "../server/users";
 
 beforeEach(() => {
   vi.clearAllMocks();

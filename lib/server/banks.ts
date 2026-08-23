@@ -1,19 +1,17 @@
-"use server";
+// Server-only. Reads Plaid using stored access tokens and returns raw provider
+// data. None of these are called from a client component — they are consumed by
+// server components and by other server modules — so none needs to be a
+// publicly callable server action.
+import "server-only";
 
-import {
-  ACHClass,
-  CountryCode,
-  TransferAuthorizationCreateRequest,
-  TransferCreateRequest,
-  TransferNetwork,
-  TransferType,
-} from "plaid";
+import { CountryCode } from "plaid";
 
 import { plaidClient } from "../plaid";
 import { parseStringify } from "../utils";
 
-import { getTransactionsByBankId } from "./transaction.actions";
-import { getBanks, getBank } from "./user.actions";
+import { getTransactionsByBankId } from "./transactions";
+import { getBanks } from "./users";
+import { getBank } from "../actions/user.actions";
 
 // Get multiple bank accounts
 export const getAccounts = async ({ userId }: getAccountsProps) => {

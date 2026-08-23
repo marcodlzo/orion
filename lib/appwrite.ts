@@ -1,4 +1,10 @@
-"use server";
+// Server-only. This module builds Appwrite clients, one of which authenticates
+// with NEXT_APPWRITE_KEY and bypasses every Appwrite permission rule.
+//
+// It previously carried "use server", which made createSessionClient and
+// createAdminClient publicly callable server actions. Neither is intended to
+// cross the browser/server boundary; both are internal infrastructure.
+import "server-only";
 
 import { Client, Account, Databases, Users } from "node-appwrite";
 import { cookies } from "next/headers";

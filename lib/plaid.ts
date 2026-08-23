@@ -1,3 +1,7 @@
+// Server-only. Holds PLAID_CLIENT_ID and PLAID_SECRET; must never be reachable
+// from a client component.
+import "server-only";
+
 import { Configuration, PlaidApi, PlaidEnvironments } from 'plaid';
 
 const configuration = new Configuration({

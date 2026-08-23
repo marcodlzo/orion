@@ -1,3 +1,9 @@
+'use client';
+
+// Uses useState, useEffect, useCallback and usePlaidLink, so this is a client
+// component. It previously had no directive and worked only because AuthForm
+// and Sidebar (both client components) import it — the boundary was inherited
+// rather than declared.
 import React, { useCallback, useEffect, useState } from 'react'
 import { Button } from './ui/button'
 import { PlaidLinkOnSuccess, PlaidLinkOptions, usePlaidLink } from 'react-plaid-link'

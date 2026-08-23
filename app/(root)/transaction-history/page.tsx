@@ -1,7 +1,7 @@
 import HeaderBox from '@/components/HeaderBox'
 import { Pagination } from '@/components/Pagination';
 import TransactionsTable from '@/components/TransactionsTable';
-import { getAccount, getAccounts } from '@/lib/actions/bank.actions';
+import { getAccount, getAccounts } from '@/lib/server/banks';
 import { getLoggedInUser } from '@/lib/actions/user.actions';
 import { formatAmount } from '@/lib/utils';
 import React from 'react'

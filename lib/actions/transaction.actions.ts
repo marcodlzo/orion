@@ -1,6 +1,17 @@
 "use server";
 
-import { ID, Query } from "node-appwrite";
+// Only createTransaction remains a server action: it is invoked directly from
+// PaymentTransferForm.tsx, a client component.
+//
+// It is currently unauthenticated and unvalidated, which means transaction
+// history can be fabricated by any caller. That is catalogued and addressed by
+// the authorization milestone; nothing about its behaviour changes here.
+//
+// getTransactionsByBankId was never called from a client component and now
+// lives in lib/server/transactions.ts.
+
+import { ID } from "node-appwrite";
+
 import { createAdminClient } from "../appwrite";
 import { parseStringify } from "../utils";
 
@@ -25,36 +36,6 @@ export const createTransaction = async (transaction: CreateTransactionProps) => 
     )
 
     return parseStringify(newTransaction);
-  } catch (error) {
-    console.log(error);
-  }
-}
-
-export const getTransactionsByBankId = async ({bankId}: getTransactionsByBankIdProps) => {
-  try {
-    const { database } = await createAdminClient();
-
-    const senderTransactions = await database.listDocuments(
-      DATABASE_ID!,
-      TRANSACTION_COLLECTION_ID!,
-      [Query.equal('senderBankId', bankId)],
-    )
-
-    const receiverTransactions = await database.listDocuments(
-      DATABASE_ID!,
-      TRANSACTION_COLLECTION_ID!,
-      [Query.equal('receiverBankId', bankId)],
-    );
-
-    const transactions = {
-      total: senderTransactions.total + receiverTransactions.total,
-      documents: [
-        ...senderTransactions.documents, 
-        ...receiverTransactions.documents,
-      ]
-    }
-
-    return parseStringify(transactions);
   } catch (error) {
     console.log(error);
   }

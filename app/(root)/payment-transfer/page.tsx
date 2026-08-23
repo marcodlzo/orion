@@ -1,6 +1,6 @@
 import HeaderBox from '@/components/HeaderBox'
 import PaymentTransferForm from '@/components/PaymentTransferForm'
-import { getAccounts } from '@/lib/actions/bank.actions';
+import { getAccounts } from '@/lib/server/banks';
 import { getLoggedInUser } from '@/lib/actions/user.actions';
 import React from 'react'
 
