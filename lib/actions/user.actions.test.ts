@@ -214,8 +214,12 @@ describe("baseline — behaviour that should SURVIVE the authorization milestone
 
     expect(listDocuments).toHaveBeenCalledTimes(1);
     const [dbId, collectionId] = listDocuments.mock.calls[0];
-    expect(dbId).toBe("test-db");
-    expect(collectionId).toBe("test-banks");
+    // Asserted against the configured values rather than literals: the point
+    // is that it queries the BANK collection specifically, not that the id
+    // happens to be a particular string. CI supplies different values.
+    expect(dbId).toBe(process.env.APPWRITE_DATABASE_ID);
+    expect(collectionId).toBe(process.env.APPWRITE_BANK_COLLECTION_ID);
+    expect(collectionId).not.toBe(process.env.APPWRITE_USER_COLLECTION_ID);
   });
 
   it("returns a plain serializable object, not an Appwrite model instance", async () => {
