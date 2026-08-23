@@ -11,29 +11,28 @@ import { useRouter } from 'next/navigation';
 import { createLinkToken, exchangePublicToken } from '@/lib/actions/user.actions';
 import Image from 'next/image';
 
-const PlaidLink = ({ user, variant }: PlaidLinkProps) => {
+const PlaidLink = ({ variant }: PlaidLinkProps) => {
   const router = useRouter();
 
   const [token, setToken] = useState('');
 
   useEffect(() => {
     const getLinkToken = async () => {
-      const data = await createLinkToken(user);
+      const data = await createLinkToken();
 
       setToken(data?.linkToken);
     }
 
     getLinkToken();
-  }, [user]);
+  }, []);
 
   const onSuccess = useCallback<PlaidLinkOnSuccess>(async (public_token: string) => {
     await exchangePublicToken({
       publicToken: public_token,
-      user,
     })
 
     router.push('/');
-  }, [user, router])
+  }, [router])
   
   const config: PlaidLinkOptions = {
     token,

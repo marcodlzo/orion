@@ -14,13 +14,32 @@
 // lib/server/dwolla.ts and are no longer publicly callable.
 
 import { dwollaClient } from "../server/dwolla";
+import { requireActor } from "../auth/actor";
 
+/**
+ * PROTECTED — authenticated, NOT yet authorized.
+ *
+ * An anonymous caller can no longer move money. That is the entire extent of
+ * the improvement here.
+ *
+ * STILL VULNERABLE, and this is the most dangerous endpoint in the application:
+ * both funding-source URLs still come from the caller. An authenticated user
+ * who knows a victim's funding-source URL can name it as the source and their
+ * own as the destination. Possession of a URL remains sufficient to move money
+ * from it.
+ *
+ * This cannot be fixed by adding a check here — the fix is to stop accepting
+ * funding-source URLs from the browser at all, which is the transfer
+ * orchestration phase.
+ */
 export const createTransfer = async ({
   sourceFundingSourceUrl,
   destinationFundingSourceUrl,
   amount,
 }: TransferParams) => {
   try {
+    await requireActor();
+
     const requestBody = {
       _links: {
         source: {

@@ -98,6 +98,21 @@ const ALLOWED_SERVER_ACTIONS = [
  * clients, provider credentials or raw documents and are not called from any
  * client component. None may be exported from a "use server" module again.
  */
+/**
+ * Actions that must resolve an authenticated actor before any privileged work.
+ * Everything not listed in PUBLIC_AUTH_ENTRY belongs here.
+ */
+const PROTECTED_ACTIONS = [
+  "createLinkToken",
+  "createTransaction",
+  "createTransfer",
+  "exchangePublicToken",
+  "getBank",
+  "getBankByAccountId",
+  "getLoggedInUser",
+  "logoutAccount",
+];
+
 const MUST_STAY_INTERNAL = [
   "addFundingSource",
   "createAdminClient",
@@ -140,9 +155,95 @@ describe("server-action surface", () => {
   });
 });
 
+/**
+ * The only actions that may run without an authenticated actor.
+ *
+ * These are authentication ENTRY points: requiring a session to sign in would
+ * be circular. Adding a name here creates an anonymous endpoint — do not widen
+ * it to make a test pass.
+ */
+const PUBLIC_AUTH_ENTRY = ["signIn", "signUp"].sort();
+
+describe("authentication boundary", () => {
+  const modules = findActionModules();
+
+  it("has exactly two intentionally public auth-entry actions", () => {
+    const publicActions = ALLOWED_SERVER_ACTIONS.filter(
+      (fn) => !PROTECTED_ACTIONS.includes(fn)
+    ).sort();
+    expect(publicActions).toEqual(PUBLIC_AUTH_ENTRY);
+  });
+
+  it("accounts for every action as either public entry or protected", () => {
+    expect([...PUBLIC_AUTH_ENTRY, ...PROTECTED_ACTIONS].sort()).toEqual(
+      ALLOWED_SERVER_ACTIONS
+    );
+  });
+
+  it("every module holding a protected action imports the actor boundary", () => {
+    for (const mod of modules) {
+      const holdsProtected = mod.exports.some((fn) => PROTECTED_ACTIONS.includes(fn));
+      if (!holdsProtected) continue;
+
+      const src = readFileSync(join(ROOT, mod.file), "utf8");
+      // Match the import statement specifically, so a mention in a comment
+      // cannot satisfy this.
+      expect(src, `${mod.file} must import requireActor`).toMatch(
+        /^import\s+\{[^}]*\brequireActor\b[^}]*\}\s+from\s+["'][^"']*auth\/actor["']/m
+      );
+    }
+  });
+
+  it("calls requireActor inside every protected action body", () => {
+    for (const mod of modules) {
+      const src = readFileSync(join(ROOT, mod.file), "utf8");
+      const withoutComments = src
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+      for (const fn of mod.exports) {
+        if (!PROTECTED_ACTIONS.includes(fn)) continue;
+
+        // Body runs from the declaration to the next top-level export.
+        const start = withoutComments.search(
+          new RegExp(`^export\\s+(?:const|async function|function)\\s+${fn}\\b`, "m")
+        );
+        expect(start, `${fn} not found in ${mod.file}`).toBeGreaterThan(-1);
+        const rest = withoutComments.slice(start + 1);
+        const nextExport = rest.search(/^export\s+(?:const|async function|function)\s/m);
+        const body = nextExport === -1 ? rest : rest.slice(0, nextExport);
+
+        expect(body, `${fn} must call requireActor()`).toMatch(/requireActor\s*\(/);
+      }
+    }
+  });
+
+  it("no protected action accepts a caller-supplied identity parameter", () => {
+    // Identity must come from the session. A parameter named user/userId/
+    // accountId-as-identity is what made these actions impersonatable.
+    for (const mod of modules) {
+      const src = readFileSync(join(ROOT, mod.file), "utf8");
+      const withoutComments = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+      for (const fn of mod.exports) {
+        if (!PROTECTED_ACTIONS.includes(fn)) continue;
+        const decl = new RegExp(
+          `export\\s+(?:const|async function|function)\\s+${fn}\\s*(?:=\\s*async\\s*)?\\(([^)]*)\\)`,
+          "m"
+        );
+        const params = decl.exec(withoutComments)?.[1] ?? "";
+        expect(params, `${fn} must not take a caller-supplied user`).not.toMatch(
+          /\buser\s*[,:}]|\buser\s*$/
+        );
+      }
+    }
+  });
+});
+
 describe("server-only boundaries", () => {
   const mustBeServerOnly = [
     "lib/appwrite.ts",
+    "lib/auth/actor.ts",
     "lib/plaid.ts",
     "lib/server/banks.ts",
     "lib/server/dwolla.ts",
