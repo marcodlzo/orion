@@ -1,0 +1,93 @@
+name: CI
+
+# Every check here runs on every change and blocks merge, type and lint
+# errors included.
+#
+# Every job here is required. None may be made non-blocking to get a merge
+# through — the audit found ignoreBuildErrors and ignoreDuringBuilds enabled,
+# which is exactly how five type errors survived into main.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: typecheck · lint · test · build
+    runs-on: ubuntu-latest
+
+    env:
+      # Placeholders only. No job here may require a real credential — contract
+      # tests belong against provider sandboxes with secrets injected
+      # explicitly, never against live accounts.
+      NEXT_PUBLIC_APPWRITE_ENDPOINT: https://ci.invalid/v1
+      NEXT_PUBLIC_APPWRITE_PROJECT: ci-project
+      NEXT_APPWRITE_KEY: ci-key
+      APPWRITE_DATABASE_ID: ci-db
+      APPWRITE_USER_COLLECTION_ID: ci-users
+      APPWRITE_BANK_COLLECTION_ID: ci-banks
+      APPWRITE_TRANSACTION_COLLECTION_ID: ci-transactions
+      PLAID_CLIENT_ID: ci-plaid-client
+      PLAID_SECRET: ci-plaid-secret
+      DWOLLA_KEY: ci-dwolla-key
+      DWOLLA_SECRET: ci-dwolla-secret
+      DWOLLA_ENV: sandbox
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # Secrets must never enter browser bundles, and this is verified
+      # rather than assumed. Tree-shaking removed the tutorial's
+      # Plaid tokens from the emitted .js but left them readable in a served
+      # .js.map, so this scans the whole client output including source maps.
+      - name: Scan client bundle for credentials
+        run: |
+          set -euo pipefail
+          echo "Scanning .next/static for credential patterns..."
+          if grep -rIlE \
+            'access-(sandbox|development|production)-[0-9a-f]{8}|processor-(sandbox|development|production)-[0-9a-f]{8}|https://[0-9a-f]{16,}@[a-z0-9.-]*ingest[a-z.-]*sentry\.io|-----BEGIN [A-Z ]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}' \
+            .next/static 2>/dev/null; then
+            echo "::error::Credential-shaped string found in client build output"
+            exit 1
+          fi
+          echo "Clean — no credential patterns in client output."
+
+      - name: Assert no source maps are served to clients
+        run: |
+          set -euo pipefail
+          count=$(find .next/static -name '*.js.map' | wc -l)
+          echo "client .js.map files: $count"
+          if [ "$count" -ne 0 ]; then
+            echo "::error::Source maps are being emitted to client static output"
+            find .next/static -name '*.js.map'
+            exit 1
+          fi
