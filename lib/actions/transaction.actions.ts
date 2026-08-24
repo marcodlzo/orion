@@ -1,57 +1,47 @@
 "use server";
 
-// Only createTransaction remains a server action: it is invoked directly from
-// PaymentTransferForm.tsx, a client component.
-//
-// It is currently unauthenticated and unvalidated, which means transaction
-// history can be fabricated by any caller. That is catalogued and addressed by
-// the authorization milestone; nothing about its behaviour changes here.
-//
-// getTransactionsByBankId was never called from a client component and now
-// lives in lib/server/transactions.ts.
-
-import { ID } from "node-appwrite";
-
-import { createAdminClient } from "../appwrite";
-import { parseStringify } from "../utils";
 import { requireActor } from "../auth/actor";
-
-const {
-  APPWRITE_DATABASE_ID: DATABASE_ID,
-  APPWRITE_TRANSACTION_COLLECTION_ID: TRANSACTION_COLLECTION_ID,
-} = process.env;
+import { getOwnedBankByDocumentId } from "../repositories/banks.repository";
+import { NotFoundError } from "../repositories/errors";
+import { createTransactionRecord } from "../repositories/transactions.repository";
+import { parseStringify } from "../utils";
 
 /**
- * PROTECTED — authenticated, NOT yet authorized.
+ * PROTECTED — partially hardened.
  *
- * An anonymous caller can no longer write transaction records. That closes the
- * unauthenticated-write hole.
+ * WHAT IS NOW ENFORCED
+ *  - the caller is authenticated
+ *  - `senderBankId` must be a bank the actor actually owns; otherwise
+ *    NotFoundError and nothing is written
+ *  - `senderId` is derived from the session and the caller's value is ignored,
+ *    so a record cannot claim somebody else sent the money
  *
- * STILL VULNERABLE: every field is taken from the caller, including senderId,
- * receiverId, senderBankId, receiverBankId and amount. An authenticated user
- * can still fabricate history naming any two parties. Deriving the sender from
- * the actor and validating the rest belongs to the ownership and transfer
- * phases.
+ * WHAT IS STILL BROKEN — do not read the checks above as "safe"
+ *  - `receiverId`, `receiverBankId`, `amount` and `name` are still whatever the
+ *    caller sends
+ *  - nothing ties this record to an actual money movement. An authenticated
+ *    user can still call this directly and fabricate history crediting or
+ *    debiting a counterparty, provided they name one of their own banks as the
+ *    sender
+ *  - `amount` remains a string, and no ledger entry is produced
+ *
+ * The real fix is not another check here. It is deleting this endpoint and
+ * writing the record inside a server-owned transfer, which is the
+ * orchestration phase.
  */
 export const createTransaction = async (transaction: CreateTransactionProps) => {
-  try {
-    await requireActor();
+  const actor = await requireActor();
 
-    const { database } = await createAdminClient();
+  // The sending side must belong to the caller.
+  const senderBank = await getOwnedBankByDocumentId(actor, transaction.senderBankId);
+  if (!senderBank) throw new NotFoundError("Sender bank not found");
 
-    const newTransaction = await database.createDocument(
-      DATABASE_ID!,
-      TRANSACTION_COLLECTION_ID!,
-      ID.unique(),
-      {
-        channel: 'online',
-        category: 'Transfer',
-        ...transaction
-      }
-    )
+  const created = await createTransactionRecord({
+    ...transaction,
+    // Session wins over anything the caller supplied.
+    senderId: actor.userId,
+    senderBankId: senderBank.$id,
+  });
 
-    return parseStringify(newTransaction);
-  } catch (error) {
-    console.log(error);
-  }
+  return parseStringify(created);
 }

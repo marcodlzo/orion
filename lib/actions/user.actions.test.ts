@@ -1,33 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+import { NotFoundError } from "../repositories/errors";
+import { InfrastructureError, UnauthorizedError } from "../auth/errors";
+
 /**
- * CHARACTERISATION TESTS — ownership enforcement.
+ * OWNERSHIP ENFORCEMENT.
  *
- * ============================ READ THIS FIRST ============================
- * These assert what the code does TODAY, including behaviour the audit
- * classified as CONFIRMED CRITICAL. They are not a specification.
+ * These previously asserted a live vulnerability: an authenticated user could
+ * read any other user's bank by supplying its id. That is now closed, and these
+ * assert the secure behaviour instead. They must not be relaxed.
  *
- * Every test named DEFECT documents a live vulnerability. The repository /
- * ownership phase MUST make these fail, and each is then rewritten to assert
- * the secure behaviour in its "AFTER" comment.
+ * Alice is the authenticated caller throughout. Bob is the would-be victim.
  *
- * Do NOT defend these assertions. Do NOT treat a failure as a regression.
- * =========================================================================
- *
- * WHAT CHANGED IN THE AUTHENTICATION PHASE
- *
- * These were originally written as "unauthenticated IDOR": an anonymous caller
- * could read any record. That is no longer true — every action below now
- * resolves the caller from the session first, and an anonymous request reaches
- * no privileged collaborator (proved in authentication.test.ts).
- *
- * The remaining defect is narrower and still critical: ANY AUTHENTICATED USER
- * can pass ANY OTHER USER'S resource identifier and receive that record,
- * because no query is scoped to the caller. Alice is authenticated throughout
- * these tests; Bob is her victim.
- *
- * Authentication asks "who is calling?" and is answered. Authorization asks
- * "may they touch this?" and is not.
+ * What is verified here is ACCESS CONTROL only. These say nothing about what
+ * fields a response carries — Alice's own bank record still includes her Plaid
+ * access token and Dwolla funding-source URL. Data minimisation is a separate
+ * concern and a separate phase.
  */
 
 const {
@@ -45,7 +33,6 @@ const {
 vi.mock("next/headers", () => ({
   cookies: () => ({ get: cookieGet, set: vi.fn(), delete: vi.fn() }),
 }));
-
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 
 vi.mock("../appwrite", () => ({
@@ -73,10 +60,10 @@ vi.mock("../server/dwolla", () => ({
   createDwollaCustomer: vi.fn(),
 }));
 
-import { getBank, getBankByAccountId } from "./user.actions";
-import { getBanks, getUserInfo } from "../server/users";
+import { getBank, getBankByAccountId, getLoggedInUser } from "./user.actions";
+import { getOwnedBanks } from "../repositories/banks.repository";
+import { requireActor } from "../auth/actor";
 
-// Alice is the authenticated caller.
 const ALICE_USER_DOC = {
   $id: "user-doc-alice",
   userId: "auth-alice",
@@ -89,22 +76,19 @@ const ALICE_USER_DOC = {
   dwollaCustomerId: "dwolla-alice",
 };
 
-// Bob is the victim. Alice has no relationship to any of this.
-const BOB_USER_DOC = {
-  $id: "user-doc-bob",
-  userId: "auth-bob",
-  email: "bob@example.com",
-  firstName: "Bob",
-  lastName: "Baker",
-  ssn: "222-22-2222",
-  dateOfBirth: "1985-05-05",
-  address1: "2 Bob Street",
-  dwollaCustomerId: "dwolla-bob",
+const ALICE_BANK_DOC = {
+  $id: "bank-doc-alice",
+  userId: { $id: "user-doc-alice" },
+  accountId: "plaid-account-alice",
+  bankId: "plaid-item-alice",
+  accessToken: "access-sandbox-alice-token",
+  fundingSourceUrl: "https://api-sandbox.dwolla.com/funding-sources/funding-alice",
+  shareableId: "cGxhaWQtYWNjb3VudC1hbGljZQ==",
 };
 
 const BOB_BANK_DOC = {
   $id: "bank-doc-bob",
-  userId: BOB_USER_DOC,
+  userId: { $id: "user-doc-bob" },
   accountId: "plaid-account-bob",
   bankId: "plaid-item-bob",
   accessToken: "access-sandbox-bob-secret-token",
@@ -116,123 +100,153 @@ const USER_COLLECTION = process.env.APPWRITE_USER_COLLECTION_ID;
 const BANK_COLLECTION = process.env.APPWRITE_BANK_COLLECTION_ID;
 
 /**
- * Alice holds a valid session. The user collection resolves her identity; the
- * bank collection returns whatever the test seeds.
+ * node-appwrite serialises each query to a JSON string such as
+ * {"method":"equal","attribute":"userId","values":["user-doc-alice"]}.
+ * Parsing them is exact; substring matching against them is not, because
+ * JSON.stringify of the array escapes every quote.
  */
-function authenticateAliceAndSeedBank(bank: unknown = BOB_BANK_DOC, bankTotal = 1) {
+type ParsedQuery = { method: string; attribute: string; values: unknown[] };
+
+function parseQueries(queries: unknown): ParsedQuery[] {
+  if (!Array.isArray(queries)) return [];
+  return queries.flatMap((q) => {
+    try {
+      return [JSON.parse(String(q)) as ParsedQuery];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/** The value a query filters a given attribute on, if any. */
+function filterValue(queries: unknown, attribute: string): string | undefined {
+  const q = parseQueries(queries).find((x) => x.attribute === attribute);
+  return q ? String(q.values[0]) : undefined;
+}
+
+/**
+ * Alice is authenticated. The bank collection behaves like a real datastore:
+ * it applies whatever predicates the query actually carries, so a query that
+ * filters on the wrong attribute genuinely returns nothing rather than
+ * accidentally passing.
+ */
+function authenticateAlice(banks = [ALICE_BANK_DOC, BOB_BANK_DOC]) {
   cookieGet.mockReturnValue({ value: "session-for-alice" });
   accountGet.mockResolvedValue({ $id: "auth-alice" });
-  listDocuments.mockImplementation(async (_db: string, collectionId: string) => {
-    if (collectionId === USER_COLLECTION) {
-      return { documents: [ALICE_USER_DOC], total: 1 };
+
+  listDocuments.mockImplementation(
+    async (_db: string, collectionId: string, queries: unknown[]) => {
+      if (collectionId === USER_COLLECTION) {
+        return { documents: [ALICE_USER_DOC], total: 1 };
+      }
+
+      const parsed = parseQueries(queries);
+      const matched = banks.filter((bank) =>
+        parsed.every((q) => {
+          const expected = String(q.values[0]);
+          if (q.attribute === "userId") {
+            return (bank.userId as { $id: string }).$id === expected;
+          }
+          if (q.attribute === "$id") return bank.$id === expected;
+          if (q.attribute === "accountId") return bank.accountId === expected;
+          return true;
+        })
+      );
+
+      return { documents: matched, total: matched.length };
     }
-    return { documents: bank === null ? [] : [bank], total: bankTotal };
-  });
+  );
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  authenticateAliceAndSeedBank();
+  authenticateAlice();
 });
 
-describe("getBank — authentication is enforced", () => {
-  it("FIXED: resolves the caller from the session before any admin read", async () => {
-    // This assertion is inverted from its original form. It used to prove the
-    // action never read the session cookie. It now proves it does.
-    await getBank({ documentId: "bank-doc-bob" });
-
-    expect(cookieGet).toHaveBeenCalled();
-  });
-});
-
-describe("getBank — DEFECT: missing ownership enforcement (audit S2, CRITICAL)", () => {
-  it("DEFECT: an authenticated user receives another user's bank document", async () => {
-    // Alice is authenticated as herself and asks for Bob's bank document id.
-    const result = await getBank({ documentId: "bank-doc-bob" });
-
-    expect(result.$id).toBe("bank-doc-bob");
-    // AFTER: throws NotFound — bank-doc-bob is not owned by the actor, and a
-    // 404 rather than 403 avoids confirming the record exists.
+describe("A. getBank — cross-owner access is denied", () => {
+  it("FIXED: Alice reading Bob's bank id raises NotFound", async () => {
+    // BEFORE: returned Bob's full document including his Plaid access token.
+    await expect(getBank({ documentId: "bank-doc-bob" })).rejects.toBeInstanceOf(
+      NotFoundError
+    );
   });
 
-  it("DEFECT: the query is not scoped to the caller", async () => {
-    await getBank({ documentId: "bank-doc-bob" });
+  it("Alice can still read her own bank", async () => {
+    const bank = await getBank({ documentId: "bank-doc-alice" });
+
+    expect(bank.$id).toBe("bank-doc-alice");
+  });
+
+  it("a missing bank and an unowned bank are indistinguishable", async () => {
+    const unowned = await getBank({ documentId: "bank-doc-bob" }).catch((e) => e);
+    const missing = await getBank({ documentId: "does-not-exist" }).catch((e) => e);
+
+    // Returning "forbidden" for an unowned record would confirm the id is real
+    // and turn this action into an enumeration oracle.
+    expect(unowned).toBeInstanceOf(NotFoundError);
+    expect(missing).toBeInstanceOf(NotFoundError);
+    expect(unowned.message).toBe(missing.message);
+  });
+
+  it("scopes ownership inside the datastore query, not after fetching", async () => {
+    await getBank({ documentId: "bank-doc-alice" });
 
     const bankCall = listDocuments.mock.calls.find(
       (c: unknown[]) => c[1] === BANK_COLLECTION
     );
-    expect(bankCall).toBeDefined();
-
-    // Nothing in the query mentions the authenticated actor, so the datastore
-    // is asked for the record by id alone.
-    expect(JSON.stringify(bankCall?.[2])).not.toContain("user-doc-alice");
-    // AFTER: the query carries an equality on the actor's user id.
-  });
-
-  it("DEFECT: leaks the Plaid access token and Dwolla funding-source URL", async () => {
-    const result = await getBank({ documentId: "bank-doc-bob" });
-
-    // A Plaid access token grants read access to the victim's balances,
-    // transactions and account/routing details.
-    expect(result.accessToken).toBe("access-sandbox-bob-secret-token");
-    // A funding-source URL is all createTransfer needs to move money from it.
-    expect(result.fundingSourceUrl).toContain("funding-bob");
-    // AFTER: the response is a DTO; neither field exists on it at all.
+    expect(filterValue(bankCall?.[2], "$id")).toBe("bank-doc-alice");
+    expect(filterValue(bankCall?.[2], "userId")).toBe("user-doc-alice");
   });
 });
 
-describe("getBankByAccountId — DEFECT: missing ownership enforcement (audit S2/S10)", () => {
-  it("DEFECT: any authenticated user resolves an account id to full credentials", async () => {
-    // shareableId is base64, so a recipient can decode it back to the raw Plaid
-    // account id and call this directly.
-    const result = await getBankByAccountId({ accountId: "plaid-account-bob" });
+describe("D. ownership compares the correct identifier", () => {
+  it("REGRESSION: filters on USER.$id, never the auth account id", async () => {
+    await getBank({ documentId: "bank-doc-alice" });
 
-    expect(result.accessToken).toBe("access-sandbox-bob-secret-token");
-    // AFTER: a counterparty lookup returns only what a sender needs to address
-    // a transfer — never the counterparty's credentials.
+    const bankCall = listDocuments.mock.calls.find(
+      (c: unknown[]) => c[1] === BANK_COLLECTION
+    );
+
+    // BANK.userId is a relationship to USER.$id. The user document ALSO has a
+    // field named `userId` holding the auth account id. Comparing against
+    // actor.authId would not error — it would silently match nothing, reading
+    // as "this user has no banks" rather than as a bug.
+    expect(filterValue(bankCall?.[2], "userId")).toBe("user-doc-alice");
+    expect(filterValue(bankCall?.[2], "userId")).not.toBe("auth-alice");
   });
 
-  it("returns null when the account id matches more than one bank", async () => {
-    authenticateAliceAndSeedBank(BOB_BANK_DOC, 2);
+  it("getOwnedBanks scopes on USER.$id too", async () => {
+    const actor = await requireActor();
+    listDocuments.mockClear();
 
-    expect(await getBankByAccountId({ accountId: "dupe" })).toBeNull();
-  });
-});
+    await getOwnedBanks(actor);
 
-describe("getBanks — DEFECT: missing ownership enforcement (audit S4)", () => {
-  it("DEFECT: lists any user's banks from a caller-supplied userId", async () => {
-    // No longer remotely callable — it was internalised when the server-action
-    // surface was shrunk. The defect that remains is that it trusts whatever
-    // userId its caller passes, so a caller that derives that id from client
-    // input still reads another user's banks.
-    listDocuments.mockResolvedValue({ documents: [BOB_BANK_DOC], total: 1 });
-
-    const result = await getBanks({ userId: "user-doc-bob" });
-
-    expect(result).toHaveLength(1);
-    // AFTER: the userId parameter is gone; the actor is the only identity the
-    // query can filter on.
+    const call = listDocuments.mock.calls.find(
+      (c: unknown[]) => c[1] === BANK_COLLECTION
+    );
+    expect(filterValue(call?.[2], "userId")).toBe("user-doc-alice");
+    expect(filterValue(call?.[2], "userId")).not.toBe("auth-alice");
   });
 });
 
-describe("getUserInfo — DEFECT: missing ownership enforcement + PII (audit S3/S4)", () => {
-  it("DEFECT: returns any user's record including SSN and date of birth", async () => {
-    // Also no longer remotely callable. Two defects remain: it accepts an
-    // arbitrary identifier, and it returns the raw document.
-    listDocuments.mockResolvedValue({ documents: [BOB_USER_DOC], total: 1 });
+describe("B. bank lists are actor scoped", () => {
+  it("getOwnedBanks returns only the actor's banks", async () => {
+    const actor = await requireActor();
 
-    const result = await getUserInfo({ userId: "auth-bob" });
+    const banks = await getOwnedBanks(actor);
 
-    expect(result.ssn).toBe("222-22-2222");
-    expect(result.dateOfBirth).toBe("1985-05-05");
-    expect(result.address1).toBe("2 Bob Street");
-    // AFTER: SSN is not persisted at all, and the DTO carries no PII beyond
-    // what the rendering component displays.
+    expect(banks.map((b) => b.$id)).toEqual(["bank-doc-alice"]);
+  });
+
+  it("there is no identity parameter to supply", () => {
+    // BEFORE: getBanks({ userId }) accepted any user id.
+    // AFTER: the only argument is the actor itself.
+    expect(getOwnedBanks.length).toBe(1);
   });
 });
 
-describe("error handling — DEFECT: silent undefined propagation", () => {
-  it("DEFECT: swallows a datastore failure and resolves undefined", async () => {
+describe("E. datastore failure is not reported as NotFound", () => {
+  it("raises InfrastructureError", async () => {
     listDocuments.mockImplementation(async (_db: string, collectionId: string) => {
       if (collectionId === USER_COLLECTION) {
         return { documents: [ALICE_USER_DOC], total: 1 };
@@ -240,29 +254,63 @@ describe("error handling — DEFECT: silent undefined propagation", () => {
       throw new Error("appwrite is down");
     });
 
-    // Callers spread this result and crash somewhere unrelated, with a stack
-    // trace that points nowhere near the real failure.
-    await expect(getBank({ documentId: "bank-doc-alice" })).resolves.toBeUndefined();
-    // AFTER: failures propagate as typed errors and are handled explicitly.
+    const error = await getBank({ documentId: "bank-doc-alice" }).catch((e) => e);
+
+    expect(error).toBeInstanceOf(InfrastructureError);
+    expect(error).not.toBeInstanceOf(NotFoundError);
+    // BEFORE: swallowed into console.log and resolved undefined.
   });
 });
 
-describe("baseline — behaviour that should SURVIVE the authorization phase", () => {
-  it("queries the bank collection, not another one", async () => {
-    await getBank({ documentId: "bank-doc-bob" });
+describe("F. unauthenticated callers fail before the repository runs", () => {
+  it("getBank rejects and issues no query", async () => {
+    cookieGet.mockReturnValue(undefined);
 
-    const bankCall = listDocuments.mock.calls.find(
-      (c: unknown[]) => c[1] === BANK_COLLECTION
+    await expect(getBank({ documentId: "bank-doc-alice" })).rejects.toBeInstanceOf(
+      UnauthorizedError
     );
-    expect(bankCall).toBeDefined();
-    expect(bankCall?.[0]).toBe(process.env.APPWRITE_DATABASE_ID);
+    expect(listDocuments).not.toHaveBeenCalled();
+  });
+});
+
+describe("counterparty lookup — deliberately not ownership scoped", () => {
+  it("resolves a bank the actor does NOT own, by design", async () => {
+    // Paying somebody requires reading their bank. Scoping this by ownership
+    // would break transfers entirely.
+    const bank = await getBankByAccountId({ accountId: "plaid-account-bob" });
+
+    expect(bank.$id).toBe("bank-doc-bob");
   });
 
-  it("returns a plain serializable object, not an Appwrite model instance", async () => {
-    listDocuments.mockResolvedValue({ documents: [ALICE_USER_DOC], total: 1 });
+  it("DEFECT: still returns the counterparty's provider credentials", async () => {
+    const bank = await getBankByAccountId({ accountId: "plaid-account-bob" });
 
-    const result = await getUserInfo({ userId: "auth-alice" });
+    // Access control cannot fix this — the recipient genuinely must be
+    // readable. Narrowing the response is the DTO phase; removing the
+    // browser's need to resolve a recipient is the orchestration phase.
+    expect(bank.accessToken).toBe("access-sandbox-bob-secret-token");
+    expect(bank.fundingSourceUrl).toContain("funding-bob");
+    // AFTER (DTO phase): only addressing data, never credentials.
+  });
 
-    expect(result).toEqual(JSON.parse(JSON.stringify(ALICE_USER_DOC)));
+  it("is still authenticated", async () => {
+    cookieGet.mockReturnValue(undefined);
+
+    await expect(
+      getBankByAccountId({ accountId: "plaid-account-bob" })
+    ).rejects.toBeInstanceOf(UnauthorizedError);
+    expect(listDocuments).not.toHaveBeenCalled();
+  });
+});
+
+describe("getLoggedInUser — DEFECT: raw document still crosses the boundary", () => {
+  it("DEFECT: returns ssn, dateOfBirth and address", async () => {
+    const user = await getLoggedInUser();
+
+    expect(user.ssn).toBe("111-11-1111");
+    expect(user.dateOfBirth).toBe("1990-01-01");
+    expect(user.address1).toBe("1 Alice Way");
+    // AFTER (DTO phase): SSN is not persisted at all and the response carries
+    // only what the rendering components display.
   });
 });

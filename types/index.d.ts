@@ -255,10 +255,6 @@ declare interface PaymentTransferFormProps {
 }
 
 // Actions
-declare interface getAccountsProps {
-  userId: string;
-}
-
 declare interface getAccountProps {
   appwriteItemId: string;
 }

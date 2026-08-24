@@ -9,18 +9,29 @@ import { CountryCode } from "plaid";
 import { plaidClient } from "../plaid";
 import { parseStringify } from "../utils";
 
-import { getTransactionsByBankId } from "./transactions";
-import { getBanks } from "./users";
-import { getBank } from "../actions/user.actions";
+import { requireActor } from "../auth/actor";
+import {
+  getOwnedBankByDocumentId,
+  getOwnedBanks,
+} from "../repositories/banks.repository";
+import { NotFoundError } from "../repositories/errors";
+import { getTransactionsForOwnedBank } from "../repositories/transactions.repository";
 
-// Get multiple bank accounts
-export const getAccounts = async ({ userId }: getAccountsProps) => {
+/**
+ * OWNED — every account belonging to the authenticated actor.
+ *
+ * Previously took a userId, which server components passed from the session
+ * anyway, but which made the function look like a general "accounts for any
+ * user" query. It now derives identity itself, so there is no parameter to
+ * get wrong.
+ */
+export const getAccounts = async () => {
   try {
-    // get banks from db
-    const banks = await getBanks({ userId });
+    const actor = await requireActor();
+    const banks = await getOwnedBanks(actor);
 
     const accounts = await Promise.all(
-      banks?.map(async (bank: Bank) => {
+      banks?.map(async (bank) => {
         // get each account info from plaid
         const accountsResponse = await plaidClient.accountsGet({
           access_token: bank.accessToken,
@@ -61,11 +72,20 @@ export const getAccounts = async ({ userId }: getAccountsProps) => {
   }
 };
 
-// Get one bank account
+/**
+ * OWNED — one account belonging to the actor.
+ *
+ * `appwriteItemId` reaches this from a URL query parameter, so it is fully
+ * caller-controlled. It is now resolved through an ownership-scoped query: a
+ * bank the actor does not own is never loaded, and the request fails as
+ * NotFound rather than returning another user's balances and history.
+ */
 export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
   try {
-    // get bank from db
-    const bank = await getBank({ documentId: appwriteItemId });
+    const actor = await requireActor();
+
+    const bank = await getOwnedBankByDocumentId(actor, appwriteItemId);
+    if (!bank) throw new NotFoundError("Bank not found");
 
     // get account info from plaid
     const accountsResponse = await plaidClient.accountsGet({
@@ -74,12 +94,14 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
     const accountData = accountsResponse.data.accounts[0];
 
     // get transfer transactions from appwrite
-    const transferTransactionsData = await getTransactionsByBankId({
-      bankId: bank.$id,
-    });
+    // Ownership was proven above; this reads that bank's history.
+    const transferTransactionsData = await getTransactionsForOwnedBank(
+      actor,
+      bank.$id
+    );
 
     const transferTransactions = transferTransactionsData.documents.map(
-      (transferData: Transaction) => ({
+      (transferData) => ({
         id: transferData.$id,
         name: transferData.name!,
         amount: transferData.amount!,

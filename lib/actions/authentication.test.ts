@@ -29,8 +29,8 @@ const {
   linkTokenCreate,
   itemPublicTokenExchange,
   dwollaPost,
-  getUserInfo,
-  createBankAccount,
+  findUserByAuthId,
+  createBankForActor,
 } = vi.hoisted(() => ({
   cookieGet: vi.fn(),
   accountGet: vi.fn(),
@@ -39,8 +39,8 @@ const {
   linkTokenCreate: vi.fn(),
   itemPublicTokenExchange: vi.fn(),
   dwollaPost: vi.fn(),
-  getUserInfo: vi.fn(),
-  createBankAccount: vi.fn(),
+  findUserByAuthId: vi.fn(),
+  createBankForActor: vi.fn(),
 }));
 
 vi.mock("next/headers", () => ({
@@ -82,7 +82,17 @@ vi.mock("../server/dwolla", () => ({
   createDwollaCustomer: vi.fn(),
 }));
 
-vi.mock("../server/users", () => ({ getUserInfo, createBankAccount, getBanks: vi.fn() }));
+// The user lookup moved behind the repository boundary.
+vi.mock("../repositories/users.repository", () => ({
+  findUserByAuthId,
+  createUserRecord: vi.fn(),
+}));
+vi.mock("../repositories/banks.repository", () => ({
+  createBankForActor,
+  findCounterpartyBankByAccountId: vi.fn().mockResolvedValue(null),
+  getOwnedBankByDocumentId: vi.fn().mockResolvedValue(null),
+  getOwnedBanks: vi.fn().mockResolvedValue([]),
+}));
 
 import {
   createLinkToken,
@@ -94,6 +104,20 @@ import {
 } from "./user.actions";
 import { createTransaction } from "./transaction.actions";
 import { createTransfer } from "./dwolla.actions";
+import { InfrastructureError } from "../auth/errors";
+
+const ALICE = {
+  $id: "user-doc-alice",
+  userId: "auth-alice",
+  dwollaCustomerId: "dwolla-alice",
+};
+
+/** Give the request a valid session that resolves to Alice. */
+function authenticate() {
+  cookieGet.mockReturnValue({ value: "a-valid-session-secret" });
+  accountGet.mockResolvedValue({ $id: "auth-alice" });
+  findUserByAuthId.mockResolvedValue(ALICE);
+}
 
 /** No session cookie at all — the anonymous caller. */
 const beAnonymous = () => cookieGet.mockReturnValue(undefined);
@@ -113,12 +137,12 @@ const noPrivilegedWorkHappened = () => {
 
 describe("anonymous callers reach no privileged collaborator", () => {
   it("getBank", async () => {
-    await getBank({ documentId: "bank-doc-bob" });
+    await expect(getBank({ documentId: "bank-doc-bob" })).rejects.toThrow();
     noPrivilegedWorkHappened();
   });
 
   it("getBankByAccountId", async () => {
-    await getBankByAccountId({ accountId: "plaid-account-bob" });
+    await expect(getBankByAccountId({ accountId: "plaid-account-bob" })).rejects.toThrow();
     noPrivilegedWorkHappened();
   });
 
@@ -133,7 +157,7 @@ describe("anonymous callers reach no privileged collaborator", () => {
   });
 
   it("createTransaction", async () => {
-    await createTransaction({
+    await expect(createTransaction({
       name: "fabricated",
       amount: "100.00",
       senderId: "user-doc-bob",
@@ -141,7 +165,7 @@ describe("anonymous callers reach no privileged collaborator", () => {
       receiverId: "user-doc-mallory",
       receiverBankId: "bank-doc-mallory",
       email: "mallory@example.com",
-    });
+    })).rejects.toThrow();
     noPrivilegedWorkHappened();
   });
 
@@ -162,7 +186,7 @@ describe("anonymous callers reach no privileged collaborator", () => {
   it("getLoggedInUser resolves null rather than throwing", async () => {
     // The root layout relies on null to redirect to /sign-in.
     await expect(getLoggedInUser()).resolves.toBeNull();
-    expect(getUserInfo).not.toHaveBeenCalled();
+    expect(findUserByAuthId).not.toHaveBeenCalled();
   });
 });
 
@@ -170,11 +194,13 @@ describe("getLoggedInUser distinguishes outage from logged-out", () => {
   it("rethrows an infrastructure failure instead of reporting null", async () => {
     cookieGet.mockReturnValue({ value: "a-valid-session-secret" });
     accountGet.mockResolvedValue({ $id: "auth-alice" });
-    listDocuments.mockRejectedValue(new Error("appwrite is down"));
+    findUserByAuthId.mockRejectedValue(
+      new InfrastructureError("appwrite is down")
+    );
 
     // Reporting null here would send a user to a login screen that cannot work
     // either, and hide the outage.
-    await expect(getLoggedInUser()).rejects.toThrow();
+    await expect(getLoggedInUser()).rejects.toBeInstanceOf(InfrastructureError);
   });
 });
 
@@ -184,12 +210,7 @@ describe("identity is no longer accepted from the caller", () => {
   });
 
   it("exchangePublicToken accepts only a public token", async () => {
-    cookieGet.mockReturnValue({ value: "a-valid-session-secret" });
-    accountGet.mockResolvedValue({ $id: "auth-alice" });
-    listDocuments.mockResolvedValue({
-      documents: [{ $id: "user-doc-alice", userId: "auth-alice", dwollaCustomerId: "dwolla-alice" }],
-      total: 1,
-    });
+    authenticate();
     itemPublicTokenExchange.mockRejectedValue(new Error("stop here"));
 
     // A caller-supplied user object is ignored: the extra property is not part

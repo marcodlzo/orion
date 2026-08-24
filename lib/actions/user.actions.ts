@@ -1,58 +1,65 @@
 'use server';
 
-// Every export in this module is a publicly callable POST endpoint. Only
-// functions genuinely invoked from a client component belong here.
+// Every export in this module is a publicly callable POST endpoint.
 //
-// getUserInfo, createBankAccount and getBanks were never called from the
-// browser and now live in lib/server/users.ts. createSessionClient and
-// createAdminClient are no longer actions at all — lib/appwrite.ts is
-// server-only.
+// AUTHENTICATION is enforced: every action except signIn and signUp resolves
+// the caller from the session before any privileged work.
 //
-// AUTHENTICATION vs AUTHORIZATION
+// AUTHORIZATION is now enforced for the actor's OWN resources: owned reads go
+// through actor-scoped repository methods, and the ownership predicate is part
+// of the datastore query rather than a comparison performed afterwards.
 //
-// Every action below except signIn and signUp now resolves the caller from the
-// session via requireActor() before doing any privileged work. That answers
-// "who is calling?".
-//
-// It does NOT answer "may this caller touch this record?". getBank,
-// getBankByAccountId, createTransaction and createTransfer still accept
-// client-supplied resource identifiers and do not check ownership, so an
-// authenticated user can still reach another user's data. Closing that is the
-// repository/ownership phase. Do not read the presence of requireActor() here
-// as evidence that these endpoints are safe.
+// NOT yet fixed here:
+//  - responses are still raw documents, so PII and provider credentials still
+//    cross to the browser (DTO phase)
+//  - getBankByAccountId is a counterparty lookup and is deliberately not
+//    ownership scoped (see its comment)
+//  - createTransfer still accepts funding-source URLs from the browser
+//    (transfer-orchestration phase)
 
-import { ID, Query } from "node-appwrite";
-import { createAdminClient, createSessionClient } from "../appwrite";
 import { cookies } from "next/headers";
-import { encryptId, extractCustomerIdFromUrl, parseStringify } from "../utils";
-import { CountryCode, ProcessorTokenCreateRequest, ProcessorTokenCreateRequestProcessorEnum, Products } from "plaid";
-
-import { plaidClient } from '@/lib/plaid';
 import { revalidatePath } from "next/cache";
+import {
+  CountryCode,
+  ProcessorTokenCreateRequest,
+  ProcessorTokenCreateRequestProcessorEnum,
+  Products,
+} from "plaid";
+
+import { createSessionClient } from "../appwrite";
+import { plaidClient } from '@/lib/plaid';
+import { encryptId, extractCustomerIdFromUrl, parseStringify } from "../utils";
 import { addFundingSource, createDwollaCustomer } from "../server/dwolla";
-import { createBankAccount, getUserInfo } from "../server/users";
 import { requireActor, SESSION_COOKIE } from "../auth/actor";
 import { isUnauthenticated } from "../auth/errors";
+import {
+  createAuthAccount,
+  createEmailPasswordSession,
+} from "../repositories/accounts.repository";
+import {
+  createUserRecord,
+  findUserByAuthId,
+} from "../repositories/users.repository";
+import {
+  createBankForActor,
+  findCounterpartyBankByAccountId,
+  getOwnedBankByDocumentId,
+} from "../repositories/banks.repository";
+import { NotFoundError } from "../repositories/errors";
 
-const {
-  APPWRITE_DATABASE_ID: DATABASE_ID,
-  APPWRITE_USER_COLLECTION_ID: USER_COLLECTION_ID,
-  APPWRITE_BANK_COLLECTION_ID: BANK_COLLECTION_ID,
-} = process.env;
-
+/** PUBLIC AUTH ENTRY — requiring a session to sign in would be circular. */
 export const signIn = async ({ email, password }: signInProps) => {
   try {
-    const { account } = await createAdminClient();
-    const session = await account.createEmailPasswordSession(email, password);
+    const session = await createEmailPasswordSession(email, password);
 
-    cookies().set("appwrite-session", session.secret, {
+    cookies().set(SESSION_COOKIE, session.secret, {
       path: "/",
       httpOnly: true,
       sameSite: "strict",
       secure: true,
     });
 
-    const user = await getUserInfo({ userId: session.userId }) 
+    const user = await findUserByAuthId(session.userId);
 
     return parseStringify(user);
   } catch (error) {
@@ -60,47 +67,47 @@ export const signIn = async ({ email, password }: signInProps) => {
   }
 }
 
+/**
+ * PUBLIC AUTH ENTRY — no account exists yet.
+ *
+ * DEFECT (not this phase): the three steps below are not a transaction. A
+ * failure between them leaves an orphaned auth account, an orphaned Dwolla
+ * customer, or an account with no internal record — the state
+ * ActorNotProvisionedError exists to report.
+ */
 export const signUp = async ({ password, ...userData }: SignUpParams) => {
   const { email, firstName, lastName } = userData;
-  
-  let newUserAccount;
 
   try {
-    const { account, database } = await createAdminClient();
+    const newUserAccount = await createAuthAccount({
+      email,
+      password,
+      name: `${firstName} ${lastName}`,
+    });
 
-    newUserAccount = await account.create(
-      ID.unique(), 
-      email, 
-      password, 
-      `${firstName} ${lastName}`
-    );
-
-    if(!newUserAccount) throw new Error('Error creating user')
+    if (!newUserAccount) throw new Error('Error creating user')
 
     const dwollaCustomerUrl = await createDwollaCustomer({
       ...userData,
       type: 'personal'
     })
 
-    if(!dwollaCustomerUrl) throw new Error('Error creating Dwolla customer')
+    if (!dwollaCustomerUrl) throw new Error('Error creating Dwolla customer')
 
     const dwollaCustomerId = extractCustomerIdFromUrl(dwollaCustomerUrl);
 
-    const newUser = await database.createDocument(
-      DATABASE_ID!,
-      USER_COLLECTION_ID!,
-      ID.unique(),
-      {
-        ...userData,
-        userId: newUserAccount.$id,
-        dwollaCustomerId,
-        dwollaCustomerUrl
-      }
-    )
+    // DEFECT (not this phase): userData still carries ssn and dateOfBirth, and
+    // both are persisted in plaintext.
+    const newUser = await createUserRecord({
+      ...userData,
+      userId: newUserAccount.$id,
+      dwollaCustomerId,
+      dwollaCustomerUrl,
+    });
 
-    const session = await account.createEmailPasswordSession(email, password);
+    const session = await createEmailPasswordSession(email, password);
 
-    cookies().set("appwrite-session", session.secret, {
+    cookies().set(SESSION_COOKIE, session.secret, {
       path: "/",
       httpOnly: true,
       sameSite: "strict",
@@ -116,22 +123,17 @@ export const signUp = async ({ password, ...userData }: SignUpParams) => {
 /**
  * PROTECTED — the "who am I?" probe.
  *
- * Identity comes only from the session; it accepts no parameters and never did.
- * Returning null when unauthenticated is preserved deliberately: the layout
- * relies on it to redirect to /sign-in, and turning that into a throw would
- * replace a redirect with a crash.
+ * Returning null when unauthenticated is preserved: the root layout relies on
+ * it to redirect to /sign-in. An infrastructure failure is rethrown rather than
+ * flattened to null, so an outage does not present as "logged out".
  *
- * An INFRASTRUCTURE failure is now rethrown rather than flattened to null. A
- * datastore outage previously looked identical to "logged out", which sent
- * users to a login screen that could not work either.
- *
- * DEFECT (not fixed here): the response is still the raw user document, so it
- * carries ssn, dateOfBirth and address. That is the DTO phase.
+ * DEFECT (not this phase): still returns the raw user document, so ssn,
+ * dateOfBirth and address cross to the browser.
  */
 export async function getLoggedInUser() {
   try {
     const actor = await requireActor();
-    const user = await getUserInfo({ userId: actor.authId });
+    const user = await findUserByAuthId(actor.authId);
 
     return parseStringify(user);
   } catch (error) {
@@ -141,18 +143,13 @@ export async function getLoggedInUser() {
 }
 
 /**
- * PROTECTED — accepts no identity; acts on the current session only.
+ * PROTECTED — acts on the current session only; accepts no identity.
  *
- * Ordering fixed: the server-side Appwrite session is revoked BEFORE the cookie
- * is cleared. Previously the cookie was deleted first, so a failure in
- * deleteSession left a live server session while the browser believed it had
- * logged out. Fixed here because it is one statement inside the path this phase
- * already touches.
+ * The server-side session is revoked BEFORE the cookie is cleared, so a failure
+ * cannot leave a live server session while the browser believes it logged out.
  *
- * DEFECT (not fixed here): this resolves undefined on success, so the caller's
- * `if (loggedOut) router.push('/sign-in')` never runs and the user is not
- * navigated away. That is a client-side contract change, out of scope for an
- * authentication phase; tracked separately.
+ * DEFECT (not this phase): resolves undefined on success, so the caller's
+ * `if (loggedOut) router.push('/sign-in')` never runs.
  */
 export const logoutAccount = async () => {
   try {
@@ -167,19 +164,11 @@ export const logoutAccount = async () => {
   }
 }
 
-/**
- * PROTECTED — no longer accepts a caller-supplied user object.
- *
- * The Plaid link token is now minted for the session's own identity. Previously
- * the browser chose whose id it was issued against.
- *
- * client_name is a display string shown inside Plaid Link, so the profile is
- * read explicitly here rather than being carried on the Actor.
- */
+/** PROTECTED — the link token is minted for the session's identity. */
 export const createLinkToken = async () => {
   try {
     const actor = await requireActor();
-    const user = await getUserInfo({ userId: actor.authId });
+    const user = await findUserByAuthId(actor.authId);
 
     const tokenParams = {
       user: {
@@ -200,15 +189,14 @@ export const createLinkToken = async () => {
 }
 
 /**
- * PROTECTED — no longer accepts a caller-supplied user object.
+ * PROTECTED — the linked bank is filed against the session's identity.
  *
- * Previously the browser sent the entire user document and this action trusted
- * `user.dwollaCustomerId` and `user.$id`. That let a caller attach a bank as a
- * funding source on someone else's Dwolla customer, or file a bank under
- * another user's id. Both identifiers now come from the session.
+ * The owner is no longer supplied by the caller, so a bank cannot be filed
+ * under another user, and the funding source is attached to the actor's own
+ * Dwolla customer.
  *
- * DEFECT (not fixed here): only accountsResponse.data.accounts[0] is used, so
- * every other account on the Plaid Item is silently discarded.
+ * DEFECT (not this phase): only accounts[0] is used, so every other account on
+ * the Plaid Item is discarded.
  */
 export const exchangePublicToken = async ({
   publicToken,
@@ -216,22 +204,19 @@ export const exchangePublicToken = async ({
   try {
     const actor = await requireActor();
 
-    // Exchange public token for access token and item ID
     const response = await plaidClient.itemPublicTokenExchange({
       public_token: publicToken,
     });
 
     const accessToken = response.data.access_token;
     const itemId = response.data.item_id;
-    
-    // Get account information from Plaid using the access token
+
     const accountsResponse = await plaidClient.accountsGet({
       access_token: accessToken,
     });
 
     const accountData = accountsResponse.data.accounts[0];
 
-    // Create a processor token for Dwolla using the access token and account ID
     const request: ProcessorTokenCreateRequest = {
       access_token: accessToken,
       account_id: accountData.account_id,
@@ -241,19 +226,15 @@ export const exchangePublicToken = async ({
     const processorTokenResponse = await plaidClient.processorTokenCreate(request);
     const processorToken = processorTokenResponse.data.processor_token;
 
-     // Create a funding source URL for the account using the Dwolla customer ID, processor token, and bank name
-     const fundingSourceUrl = await addFundingSource({
+    const fundingSourceUrl = await addFundingSource({
       dwollaCustomerId: actor.dwollaCustomerId,
       processorToken,
       bankName: accountData.name,
     });
-    
-    // If the funding source URL is not created, throw an error
-    if (!fundingSourceUrl) throw Error;
 
-    // Create a bank account using the user ID, item ID, account ID, access token, funding source URL, and shareableId ID
-    await createBankAccount({
-      userId: actor.userId,
+    if (!fundingSourceUrl) throw new Error("Failed to create a Dwolla funding source");
+
+    await createBankForActor(actor, {
       bankId: itemId,
       accountId: accountData.account_id,
       accessToken,
@@ -261,10 +242,8 @@ export const exchangePublicToken = async ({
       shareableId: encryptId(accountData.account_id),
     });
 
-    // Revalidate the path to reflect the changes
     revalidatePath("/");
 
-    // Return a success message
     return parseStringify({
       publicTokenExchange: "complete",
     });
@@ -274,59 +253,48 @@ export const exchangePublicToken = async ({
 }
 
 /**
- * PROTECTED — authenticated, NOT yet authorized.
+ * PROTECTED AND OWNERSHIP SCOPED.
  *
- * requireActor() now runs before the admin client is touched, so an anonymous
- * caller can no longer read bank documents. The actor is deliberately unused
- * below: `documentId` is a RESOURCE identifier, not an identity claim, and
- * filtering the query by the actor is the repository/ownership phase.
+ * The query filters on document id AND owner together, so another user's bank
+ * is never loaded. A record that does not exist and one that exists but is not
+ * owned both raise NotFoundError, so this cannot be used to test whether a bank
+ * id is real.
  *
- * STILL VULNERABLE: any authenticated user may pass any other user's bank
- * document id and receive it, including the Plaid access token and the Dwolla
- * funding-source URL.
+ * Errors are no longer swallowed: a datastore outage surfaces as
+ * InfrastructureError rather than as an indistinguishable undefined.
+ *
+ * DEFECT (not this phase): the response is the raw document, so the actor's own
+ * access token and funding-source URL still reach the browser.
  */
 export const getBank = async ({ documentId }: getBankProps) => {
-  try {
-    await requireActor();
+  const actor = await requireActor();
 
-    const { database } = await createAdminClient();
+  const bank = await getOwnedBankByDocumentId(actor, documentId);
+  if (!bank) throw new NotFoundError("Bank not found");
 
-    const bank = await database.listDocuments(
-      DATABASE_ID!,
-      BANK_COLLECTION_ID!,
-      [Query.equal('$id', [documentId])]
-    )
-
-    return parseStringify(bank.documents[0]);
-  } catch (error) {
-    console.log(error)
-  }
+  return parseStringify(bank);
 }
 
 /**
- * PROTECTED — authenticated, NOT yet authorized.
+ * PROTECTED — COUNTERPARTY LOOKUP, deliberately NOT ownership scoped.
  *
- * STILL VULNERABLE: `accountId` is decoded from a "shareable id" that is only
- * base64, so any authenticated user can decode a counterparty's id and receive
- * that bank's full document, credentials included. Ownership/counterparty
- * scoping is the repository phase.
+ * This resolves a transfer RECIPIENT, which by definition is a bank the actor
+ * does not own. Scoping it by ownership would break paying anybody.
+ *
+ * STILL VULNERABLE, and not fixable within this phase:
+ *  - it returns the recipient's full record, including their Plaid access token
+ *    and Dwolla funding-source URL. Narrowing the response is the DTO phase.
+ *  - the caller supplies accountId, decoded from a "shareable id" that is only
+ *    base64. Removing the browser's need to resolve a recipient at all is the
+ *    transfer-orchestration phase.
+ *
+ * Returns null on no match or an ambiguous match, preserving prior behaviour.
  */
 export const getBankByAccountId = async ({ accountId }: getBankByAccountIdProps) => {
-  try {
-    await requireActor();
+  await requireActor();
 
-    const { database } = await createAdminClient();
+  const bank = await findCounterpartyBankByAccountId(accountId);
+  if (!bank) return null;
 
-    const bank = await database.listDocuments(
-      DATABASE_ID!,
-      BANK_COLLECTION_ID!,
-      [Query.equal('accountId', [accountId])]
-    )
-
-    if(bank.total !== 1) return null;
-
-    return parseStringify(bank.documents[0]);
-  } catch (error) {
-    console.log(error)
-  }
+  return parseStringify(bank);
 }

@@ -2,20 +2,15 @@
 // client. Must never be reachable from a client component.
 import "server-only";
 
-import { Query } from "node-appwrite";
 import { cookies } from "next/headers";
 
-import { createAdminClient, createSessionClient } from "../appwrite";
+import { createSessionClient } from "../appwrite";
+import { findUserByAuthId } from "../repositories/users.repository";
 import {
   ActorNotProvisionedError,
   InfrastructureError,
   UnauthorizedError,
 } from "./errors";
-
-const {
-  APPWRITE_DATABASE_ID: DATABASE_ID,
-  APPWRITE_USER_COLLECTION_ID: USER_COLLECTION_ID,
-} = process.env;
 
 export const SESSION_COOKIE = "appwrite-session";
 
@@ -108,24 +103,16 @@ export async function requireActor(): Promise<Actor> {
     throw new UnauthorizedError("Session resolved to no account");
   }
 
-  // 3. internal user document
-  let documents: Array<Record<string, unknown>>;
-  try {
-    const { database } = await createAdminClient();
-    const result = await database.listDocuments(DATABASE_ID!, USER_COLLECTION_ID!, [
-      Query.equal("userId", [authId]),
-    ]);
-    documents = result.documents as unknown as Array<Record<string, unknown>>;
-  } catch (error) {
-    // The caller may be perfectly authenticated; we simply could not look them
-    // up. Reporting this as unauthorized would hide an outage behind a login.
-    throw new InfrastructureError("Failed to resolve the internal user record", {
-      cause: error,
-    });
-  }
+  // 3. internal user document, via the repository boundary.
+  //
+  // Passing a raw identifier is safe here and nowhere else: authId came from
+  // the verified session immediately above, never from the browser. The
+  // repository surfaces a datastore failure as InfrastructureError, which must
+  // not be downgraded to "unauthorized" — the caller may well be authenticated
+  // and we simply could not look them up.
+  const userDocument = await findUserByAuthId(authId);
 
   // 4. explicit failure rather than a fabricated actor
-  const userDocument = documents[0];
   if (!userDocument) {
     throw new ActorNotProvisionedError();
   }

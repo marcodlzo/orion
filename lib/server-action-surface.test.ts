@@ -240,6 +240,86 @@ describe("authentication boundary", () => {
   });
 });
 
+/**
+ * The ONLY files permitted to reach the admin Appwrite client.
+ *
+ * The admin client authenticates with NEXT_APPWRITE_KEY and bypasses every
+ * Appwrite permission rule, so every query it issues must be visible in one
+ * place. Scattering it back across action modules is how ownership checks get
+ * forgotten one endpoint at a time.
+ *
+ * lib/appwrite.ts is the factory itself and is necessarily on this list.
+ */
+const ADMIN_CLIENT_ALLOWED = [
+  "lib/appwrite.ts",
+  "lib/repositories/accounts.repository.ts",
+  "lib/repositories/banks.repository.ts",
+  "lib/repositories/transactions.repository.ts",
+  "lib/repositories/users.repository.ts",
+];
+
+describe("admin client boundary", () => {
+  /** Every non-test source file, with comments stripped. */
+  const sources = (() => {
+    const files: string[] = [];
+    for (const dir of SEARCH) {
+      try {
+        walk(join(ROOT, dir), files);
+      } catch {
+        /* directory may not exist */
+      }
+    }
+    return files
+      .map((file) => ({
+        file: file.slice(ROOT.length).replace(/\\/g, "/"),
+        code: readFileSync(file, "utf8")
+          .replace(/\/\*[\s\S]*?\*\//g, "")
+          .replace(/(^|[^:])\/\/.*$/gm, "$1"),
+      }))
+      .filter(({ file }) => !/\.test\.tsx?$/.test(file));
+  })();
+
+  it("createAdminClient appears only in the approved data-access layer", () => {
+    const offenders = sources
+      .filter(({ code }) => /\bcreateAdminClient\b/.test(code))
+      .map(({ file }) => file)
+      .sort();
+
+    expect(offenders).toEqual([...ADMIN_CLIENT_ALLOWED].sort());
+  });
+
+  it("no action, server helper, component or route issues a raw admin query", () => {
+    const offenders = sources
+      .filter(({ file }) => !ADMIN_CLIENT_ALLOWED.includes(file))
+      .filter(({ code }) => /\bdatabase\.(listDocuments|createDocument|updateDocument|deleteDocument|getDocument)\b/.test(code))
+      .map(({ file }) => file);
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("Appwrite Query is not constructed outside the repositories", () => {
+    // A Query built in an action is a filter nobody reviewed for ownership.
+    const offenders = sources
+      .filter(({ file }) => !file.startsWith("lib/repositories/"))
+      .filter(({ code }) => /\bQuery\.(equal|notEqual|contains|search|and|or)\s*\(/.test(code))
+      .map(({ file }) => file);
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("every repository declares server-only", () => {
+    const repos = sources.filter(({ file }) => file.startsWith("lib/repositories/"));
+    expect(repos.length).toBeGreaterThan(0);
+
+    for (const { file, code } of repos) {
+      if (file.endsWith("errors.ts")) continue; // pure error classes, no data access
+      expect(code, `${file} must import server-only`).toMatch(
+        /import\s+["']server-only["']/
+      );
+    }
+  });
+});
+
 describe("server-only boundaries", () => {
   const mustBeServerOnly = [
     "lib/appwrite.ts",
@@ -247,8 +327,10 @@ describe("server-only boundaries", () => {
     "lib/plaid.ts",
     "lib/server/banks.ts",
     "lib/server/dwolla.ts",
-    "lib/server/transactions.ts",
-    "lib/server/users.ts",
+    "lib/repositories/accounts.repository.ts",
+    "lib/repositories/banks.repository.ts",
+    "lib/repositories/transactions.repository.ts",
+    "lib/repositories/users.repository.ts",
   ];
 
   it.each(mustBeServerOnly)("%s imports server-only", (relPath) => {
