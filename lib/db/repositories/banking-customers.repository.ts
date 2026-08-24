@@ -1,6 +1,6 @@
 // Server-only. PostgreSQL write boundary for banking_customers.
 //
-// Separate from lib/repositories/*, which are the Appwrite repositories the
+// Separate from the lib/repositories directory, which holds the Appwrite ones the
 // application still uses. Nothing in the application calls these yet — they
 // exist for the backfill. Runtime cutover is a later phase.
 import "server-only";

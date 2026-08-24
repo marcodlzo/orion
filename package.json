@@ -15,7 +15,10 @@
     "db:migrate": "node --env-file-if-exists=.env.local node_modules/node-pg-migrate/bin/node-pg-migrate.js up",
     "db:rollback": "node --env-file-if-exists=.env.local node_modules/node-pg-migrate/bin/node-pg-migrate.js down",
     "db:status": "node --env-file-if-exists=.env.local node_modules/node-pg-migrate/bin/node-pg-migrate.js --dry-run up",
-    "test:db": "vitest run --config vitest.db.config.ts"
+    "test:db": "vitest run --config vitest.db.config.ts",
+    "db:backfill": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-backfill.ts",
+    "db:backfill:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-backfill.ts --commit",
+    "db:verify": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-verify.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",

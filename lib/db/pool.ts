@@ -10,6 +10,15 @@ import { Pool, type PoolClient, type QueryResultRow } from "pg";
 import { DatabaseUnavailableError, toDatabaseError } from "./errors";
 
 /**
+ * A connection enlisted in an open transaction.
+ *
+ * Re-exported so callers name OUR type rather than importing from `pg`
+ * directly: the driver stops at this adapter, and an architecture test enforces
+ * that `pg` appears nowhere outside lib/db.
+ */
+export type TransactionClient = PoolClient;
+
+/**
  * BIGINT and NUMERIC arrive as strings from node-postgres, deliberately: a
  * 64-bit integer does not fit a JavaScript number, so the driver refuses to
  * guess. Money will be stored as BIGINT minor units, and the adapter that reads

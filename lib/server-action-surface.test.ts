@@ -50,6 +50,78 @@ function matchAllGroups(src: string, re: RegExp): string[] {
   return out;
 }
 
+/**
+ * Remove comments before scanning source for a forbidden symbol.
+ *
+ * ONE left-to-right pass over both comment forms, not two passes. Stripping
+ * block comments first is subtly wrong: a line comment mentioning a glob —
+ * `// see lib/repositories/*` — contains the characters `/*`, and a
+ * block-comment-first pass treats it as an opening delimiter and deletes
+ * everything up to the next `*​/`, which is usually the end of the next JSDoc.
+ * That silently swallowed a real `import "server-only"` and made this file's
+ * guards pass on a module that did not satisfy them.
+ *
+ * A guard that a comment can switch off is not a guard. The alternation below
+ * matches whichever delimiter appears first, which is what a tokenizer does.
+ * The `[^:]` prefix keeps `https://` in a string literal from reading as a
+ * comment.
+ */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\/|(^|[^:])\/\/[^\n]*/gm, (_m, lead) => lead ?? "");
+}
+
+/**
+ * The scanner underpins every guard in this file, so it is tested directly.
+ * A bug here does not fail a test — it makes tests pass on code that violates
+ * them, which is worse.
+ */
+describe("stripComments", () => {
+  it("removes both comment forms", () => {
+    // The character before `//` is preserved by the `[^:]` guard, so the
+    // comment's text goes and the surrounding code does not shift.
+    expect(stripComments("a // gone\nb")).toBe("a \nb");
+    expect(stripComments("a /* gone */ b")).toBe("a  b");
+  });
+
+  it("does not let a glob inside a line comment open a block comment", () => {
+    // The exact shape that swallowed a real `import "server-only"`.
+    const src = [
+      "// see lib/repositories/* for the Appwrite ones",
+      'import "server-only";',
+      "/** doc */",
+      "const x = 1;",
+    ].join("\n");
+
+    expect(stripComments(src)).toContain('import "server-only";');
+    expect(stripComments(src)).toContain("const x = 1;");
+  });
+
+  it("does not let a // inside a block comment leak the block's tail", () => {
+    const src = "/* see http://example.invalid\n * more\n */ const x = 1;";
+
+    expect(stripComments(src)).toBe(" const x = 1;");
+  });
+
+  it("keeps a URL in a string literal intact", () => {
+    const src = 'const u = "https://api.example.invalid/v1";';
+
+    expect(stripComments(src)).toBe(src);
+  });
+
+  it("still hides a forbidden symbol that is genuinely commented out", () => {
+    expect(stripComments("// createAdminClient()")).not.toContain("createAdminClient");
+    expect(stripComments("/* createAdminClient() */")).not.toContain("createAdminClient");
+  });
+
+  it("does not hide a forbidden symbol that follows a glob comment", () => {
+    // Mutation check: with the old two-pass stripper this returned "", and the
+    // admin-client guard reported the file as clean.
+    const src = "// lib/repositories/*\ncreateAdminClient();\n/** doc */";
+
+    expect(stripComments(src)).toContain("createAdminClient()");
+  });
+});
+
 function findActionModules(): ActionModule[] {
   const files: string[] = [];
   for (const dir of SEARCH) {
@@ -200,9 +272,7 @@ describe("authentication boundary", () => {
   it("calls requireActor inside every protected action body", () => {
     for (const mod of modules) {
       const src = readFileSync(join(ROOT, mod.file), "utf8");
-      const withoutComments = src
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/(^|[^:])\/\/.*$/gm, "$1");
+      const withoutComments = stripComments(src);
 
       for (const fn of mod.exports) {
         if (!PROTECTED_ACTIONS.includes(fn)) continue;
@@ -226,7 +296,7 @@ describe("authentication boundary", () => {
     // accountId-as-identity is what made these actions impersonatable.
     for (const mod of modules) {
       const src = readFileSync(join(ROOT, mod.file), "utf8");
-      const withoutComments = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+      const withoutComments = stripComments(src);
 
       for (const fn of mod.exports) {
         if (!PROTECTED_ACTIONS.includes(fn)) continue;
@@ -259,6 +329,14 @@ const ADMIN_CLIENT_ALLOWED = [
   "lib/repositories/banks.repository.ts",
   "lib/repositories/transactions.repository.ts",
   "lib/repositories/users.repository.ts",
+  // OPERATOR TOOLING, NOT A REQUEST PATH. Unlike the repositories above, this
+  // module scopes nothing: it reads every user and every bank document, because
+  // a backfill has no current user. It is on this list only because a separate
+  // suite ("migration tooling stays out of the request path") proves it is
+  // unreachable from any server action and from anything client-reachable.
+  // Adding an entry here WITHOUT that containment would be an unauthenticated
+  // read of the whole dataset.
+  "lib/migration/appwrite-source.ts",
 ];
 
 describe("admin client boundary", () => {
@@ -275,9 +353,7 @@ describe("admin client boundary", () => {
     return files
       .map((file) => ({
         file: file.slice(ROOT.length).replace(/\\/g, "/"),
-        code: readFileSync(file, "utf8")
-          .replace(/\/\*[\s\S]*?\*\//g, "")
-          .replace(/(^|[^:])\/\/.*$/gm, "$1"),
+        code: stripComments(readFileSync(file, "utf8")),
       }))
       .filter(({ file }) => !/\.test\.tsx?$/.test(file));
   })();
@@ -359,9 +435,7 @@ describe("provider capabilities never reach client source", () => {
       const rel = full.slice(ROOT.length).replace(/\\/g, "/");
       if (/\.test\.tsx?$/.test(rel)) continue;
       const raw = readFileSync(full, "utf8");
-      const code = raw
-        .replace(/\/\*[\s\S]*?\*\//g, "")
-        .replace(/(^|[^:])\/\/.*$/gm, "$1");
+      const code = stripComments(raw);
 
       const imports: string[] = [];
       for (const spec of matchAllGroups(code, /from\s+["']([^"']+)["']/g)) {
@@ -490,9 +564,7 @@ describe("PostgreSQL stays server-side", () => {
     return files
       .map((file) => ({
         file: file.slice(ROOT.length).replace(/\\/g, "/"),
-        code: readFileSync(file, "utf8")
-          .replace(/\/\*[\s\S]*?\*\//g, "")
-          .replace(/(^|[^:])\/\/.*$/gm, "$1"),
+        code: stripComments(readFileSync(file, "utf8")),
       }))
       .filter(({ file }) => !/\.test\.tsx?$/.test(file));
   })();
@@ -583,6 +655,182 @@ describe("server-only boundaries", () => {
     for (const relPath of ["lib/utils.ts", "constants/index.ts"]) {
       const src = readFileSync(join(ROOT, relPath), "utf8");
       expect(src).not.toMatch(/import\s+["']server-only["']/);
+    }
+  });
+});
+
+/**
+ * THE MIGRATION-TOOLING BOUNDARY.
+ *
+ * `lib/migration/appwrite-source.ts` reads EVERY user and EVERY bank document,
+ * ignoring ownership entirely. That is correct for a one-off operator backfill
+ * and catastrophic in a request path: an unscoped read reachable from a server
+ * action is an IDOR with the authorization check not merely bypassed but absent.
+ *
+ * The rule is therefore containment, not review. Operator tooling is reachable
+ * only from scripts/.
+ */
+describe("migration tooling stays out of the request path", () => {
+  const graph = (() => {
+    const files: string[] = [];
+    for (const dir of [...SEARCH, "scripts"]) {
+      try {
+        walk(join(ROOT, dir), files);
+      } catch {
+        /* directory may not exist */
+      }
+    }
+
+    type Mod = {
+      file: string;
+      code: string;
+      isClient: boolean;
+      isAction: boolean;
+      imports: string[];
+    };
+    const mods = new Map<string, Mod>();
+
+    for (const full of files) {
+      const rel = full.slice(ROOT.length).replace(/\\/g, "/");
+      if (/\.test\.tsx?$/.test(rel)) continue;
+      const raw = readFileSync(full, "utf8");
+      const code = stripComments(raw);
+
+      const imports: string[] = [];
+      for (const spec of matchAllGroups(code, /from\s+["']([^"']+)["']/g)) {
+        let base: string;
+        if (spec.startsWith("@/")) base = join(ROOT, spec.slice(2));
+        else if (spec.startsWith(".")) base = join(ROOT, rel, "..", spec);
+        else continue;
+        for (const cand of [base + ".ts", base + ".tsx", join(base, "index.ts")]) {
+          try {
+            statSync(cand);
+            imports.push(cand.slice(ROOT.length).replace(/\\/g, "/"));
+            break;
+          } catch {
+            /* not this extension */
+          }
+        }
+      }
+
+      mods.set(rel, {
+        file: rel,
+        code,
+        isClient: /^\s*["']use client["']/m.test(raw),
+        isAction: /^\s*["']use server["']/m.test(raw),
+        imports,
+      });
+    }
+    return mods;
+  })();
+
+  /** Everything transitively imported by the given entry modules. */
+  const closure = (entries: string[]): Set<string> => {
+    const seen = new Set<string>();
+    const queue = [...entries];
+    while (queue.length) {
+      const cur = queue.pop()!;
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+      for (const dep of graph.get(cur)?.imports ?? []) {
+        if (!seen.has(dep)) queue.push(dep);
+      }
+    }
+    return seen;
+  };
+
+  const migrationModules = Array.from(graph.keys()).filter((f) =>
+    f.startsWith("lib/migration/")
+  );
+
+  it("finds the migration modules", () => {
+    expect(migrationModules).toContain("lib/migration/appwrite-source.ts");
+    expect(migrationModules).toContain("lib/migration/backfill.ts");
+    expect(migrationModules).toContain("lib/migration/verify.ts");
+  });
+
+  it("no server action reaches migration tooling, at any depth", () => {
+    const actions = Array.from(graph.values())
+      .filter((m) => m.isAction)
+      .map((m) => m.file);
+    expect(actions.length).toBeGreaterThan(0);
+
+    // Not stopping at any boundary: everything an action imports runs on the
+    // server with the action's authority.
+    const reachable = closure(actions);
+    const offenders = migrationModules.filter((f) => reachable.has(f));
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("no client-reachable module reaches migration tooling", () => {
+    const clients = Array.from(graph.values())
+      .filter((m) => m.isClient)
+      .map((m) => m.file);
+    expect(clients.length).toBeGreaterThan(0);
+
+    const reachable = closure(clients);
+    const offenders = migrationModules.filter((f) => reachable.has(f));
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("only scripts/ and lib/migration/ import the unscoped reader", () => {
+    const importers = Array.from(graph.values())
+      .filter((m) => m.imports.includes("lib/migration/appwrite-source.ts"))
+      .map((m) => m.file);
+
+    // Type-only imports are erased, so a module naming it in an `import type`
+    // is not a runtime caller; the resolver above sees the specifier either way,
+    // which makes this stricter than the runtime graph rather than looser.
+    for (const importer of importers) {
+      expect(
+        importer.startsWith("scripts/") || importer.startsWith("lib/migration/"),
+        `${importer} must not import the unscoped legacy reader`
+      ).toBe(true);
+    }
+  });
+
+  it("only scripts/ reaches the backfill and the verifier", () => {
+    const entryPoints = ["lib/migration/backfill.ts", "lib/migration/verify.ts"];
+    const importers = Array.from(graph.values())
+      .filter((m) => m.imports.some((i) => entryPoints.includes(i)))
+      .map((m) => m.file);
+
+    expect(importers.length).toBeGreaterThan(0);
+    for (const importer of importers) {
+      expect(importer.startsWith("scripts/"), `${importer} must not run a backfill`).toBe(
+        true
+      );
+    }
+  });
+
+  it("every migration module that performs I/O declares server-only", () => {
+    for (const file of migrationModules) {
+      // mapping.ts is pure — no clients, no environment, no I/O — so it stays
+      // importable anywhere and is tested without a database.
+      if (file.endsWith("mapping.ts")) continue;
+      expect(graph.get(file)!.code, `${file} must import server-only`).toMatch(
+        /import\s+["']server-only["']/
+      );
+    }
+  });
+
+  it("the migration writes no provider credential", () => {
+    // The plan carries an access token to enrich metadata and discards it. It
+    // must never be handed to a repository.
+    const backfill = graph.get("lib/migration/backfill.ts")!.code;
+    const upsertCall = backfill.slice(backfill.indexOf("upsertAccount("));
+
+    for (const forbidden of [
+      "accessTokenForEnrichment",
+      "processorToken",
+      "fundingSourceUrl",
+      "shareableId",
+    ]) {
+      expect(upsertCall, `${forbidden} must not be written to PostgreSQL`).not.toContain(
+        forbidden
+      );
     }
   });
 });
