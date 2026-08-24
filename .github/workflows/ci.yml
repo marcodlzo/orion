@@ -25,6 +25,24 @@ jobs:
     name: typecheck · lint · test · build
     runs-on: ubuntu-latest
 
+    # PostgreSQL is the future banking system of record. Schema correctness is
+    # a property of the server, not of a mock, so these tests need a real one.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: orion
+          POSTGRES_PASSWORD: orion_ci_password
+          POSTGRES_DB: orion_test
+        ports:
+          - 5432:5432
+        # The job must not start migrating a server that is still booting.
+        options: >-
+          --health-cmd "pg_isready -U orion -d orion_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
     env:
       # Placeholders only. No job here may require a real credential — contract
       # tests belong against provider sandboxes with secrets injected
@@ -41,6 +59,9 @@ jobs:
       DWOLLA_KEY: ci-dwolla-key
       DWOLLA_SECRET: ci-dwolla-secret
       DWOLLA_ENV: sandbox
+      # Same database for both: CI starts from an empty server every run.
+      DATABASE_URL: postgresql://orion:orion_ci_password@localhost:5432/orion_test
+      TEST_DATABASE_URL: postgresql://orion:orion_ci_password@localhost:5432/orion_test
 
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +82,28 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # Fails the job if PostgreSQL never became ready, rather than letting the
+      # database tests skip and report a hollow green.
+      - name: Wait for PostgreSQL
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U orion -d orion_test; then
+              echo "PostgreSQL is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::PostgreSQL did not become ready"
+          exit 1
+
+      # Proves migrations apply to a completely empty database, every run.
+      - name: Apply migrations
+        run: npm run db:migrate
+
+      - name: Database integration tests
+        run: npm run test:db
 
       - name: Build
         run: npm run build

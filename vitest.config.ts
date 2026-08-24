@@ -23,7 +23,9 @@ export default defineConfig({
     globals: false,
     setupFiles: ["./vitest.setup.ts"],
     include: ["**/*.test.ts", "**/*.test.tsx"],
-    exclude: ["node_modules/**", ".next/**"],
+    // *.db.test.ts needs a live PostgreSQL and runs under vitest.db.config.ts
+    // via `npm run test:db`. Kept out so the application suite stays hermetic.
+    exclude: ["node_modules/**", ".next/**", "**/*.db.test.ts"],
     // Financial tests must be able to run genuinely in parallel. Sequential
     // "concurrency" tests prove nothing.
     pool: "threads",

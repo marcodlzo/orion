@@ -438,6 +438,18 @@ describe("provider capabilities never reach client source", () => {
     expect(offenders).toEqual([]);
   });
 
+  it("no client-reachable module imports lib/db or pg", () => {
+    // DATABASE_URL carries credentials and pg opens raw sockets. Neither may
+    // reach a browser bundle.
+    const offenders = clientModules
+      .filter(({ code }) =>
+        /from\s+["'](pg|[^"']*lib\/db\/[^"']*|\.\.\/db\/[^"']*)["']/.test(code)
+      )
+      .map(({ file }) => file);
+
+    expect(offenders).toEqual([]);
+  });
+
   it("PaymentTransferForm imports exactly one money-movement action", () => {
     const form = clientModules.find(({ file }) =>
       file.endsWith("components/PaymentTransferForm.tsx")
@@ -455,6 +467,94 @@ describe("provider capabilities never reach client source", () => {
       "getCounterpartyBankForLegacyTransfer",
     ]) {
       expect(code, `${removed} must not be reachable from the browser`).not.toContain(removed);
+    }
+  });
+});
+
+/**
+ * THE DATABASE BOUNDARY.
+ *
+ * DATABASE_URL carries credentials and `pg` opens raw sockets. Neither may be
+ * reachable from anything that ships to a browser.
+ */
+describe("PostgreSQL stays server-side", () => {
+  const sources = (() => {
+    const files: string[] = [];
+    for (const dir of SEARCH) {
+      try {
+        walk(join(ROOT, dir), files);
+      } catch {
+        /* directory may not exist */
+      }
+    }
+    return files
+      .map((file) => ({
+        file: file.slice(ROOT.length).replace(/\\/g, "/"),
+        code: readFileSync(file, "utf8")
+          .replace(/\/\*[\s\S]*?\*\//g, "")
+          .replace(/(^|[^:])\/\/.*$/gm, "$1"),
+      }))
+      .filter(({ file }) => !/\.test\.tsx?$/.test(file));
+  })();
+
+  it("DATABASE_URL is referenced only from lib/db", () => {
+    const offenders = sources
+      .filter(({ code }) => /\bDATABASE_URL\b/.test(code))
+      .map(({ file }) => file)
+      .filter((file) => !file.startsWith("lib/db/"));
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("`pg` is imported only from lib/db", () => {
+    const offenders = sources
+      .filter(({ code }) => /from\s+["']pg["']/.test(code))
+      .map(({ file }) => file)
+      .filter((file) => !file.startsWith("lib/db/"));
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("every lib/db module declares server-only", () => {
+    const dbModules = sources.filter(({ file }) => file.startsWith("lib/db/"));
+    expect(dbModules.length).toBeGreaterThan(0);
+
+    for (const { file, code } of dbModules) {
+      // errors.ts is pure error classes with no I/O and no credentials, so it
+      // is safe to import anywhere; everything else touches the pool.
+      if (file.endsWith("errors.ts")) continue;
+      expect(code, `${file} must import server-only`).toMatch(
+        /import\s+["']server-only["']/
+      );
+    }
+  });
+
+  it("the SQL schema declares no provider-secret or balance column", () => {
+    const migrationsDir = join(ROOT, "migrations");
+    const sql = readdirSync(migrationsDir)
+      .filter((f) => f.endsWith(".sql"))
+      .map((f) => readFileSync(join(migrationsDir, f), "utf8"))
+      .join("\n")
+      // Strip BOTH line comments and single-quoted string literals. COMMENT ON
+      // statements document why these fields are absent, so the prose would
+      // otherwise make this test fail on the explanation of its own rule.
+      .replace(/--.*$/gm, "")
+      .replace(/'(?:[^']|'')*'/g, "''");
+
+    for (const forbidden of [
+      "access_token",
+      "funding_source_url",
+      "processor_token",
+      "dwolla_customer_url",
+      "ssn",
+      "date_of_birth",
+      "balance",
+      "double precision",
+      " real ",
+    ]) {
+      expect(sql.toLowerCase(), `schema must not declare ${forbidden}`).not.toContain(
+        forbidden
+      );
     }
   });
 });

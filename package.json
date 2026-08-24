@@ -9,7 +9,13 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "db:up": "docker compose up -d db",
+    "db:down": "docker compose down",
+    "db:migrate": "node --env-file-if-exists=.env.local node_modules/node-pg-migrate/bin/node-pg-migrate.js up",
+    "db:rollback": "node --env-file-if-exists=.env.local node_modules/node-pg-migrate/bin/node-pg-migrate.js down",
+    "db:status": "node --env-file-if-exists=.env.local node_modules/node-pg-migrate/bin/node-pg-migrate.js --dry-run up",
+    "test:db": "vitest run --config vitest.db.config.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",
@@ -27,6 +33,8 @@
     "lucide-react": "^0.374.0",
     "next": "14.2.3",
     "node-appwrite": "^12.0.1",
+    "node-pg-migrate": "^9.0.0",
+    "pg": "^8.23.0",
     "plaid": "^23.0.0",
     "query-string": "^9.0.0",
     "react": "^18",
@@ -42,6 +50,7 @@
   },
   "devDependencies": {
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "eslint": "^8",

@@ -1,0 +1,42 @@
+# Local development infrastructure.
+#
+# PostgreSQL only. No Redis, no message broker, nothing speculative — the
+# banking core needs relational transactions and constraints, and adding
+# infrastructure ahead of a requirement makes correctness harder, not easier.
+#
+#   docker compose up -d db
+#   npm run db:migrate
+#
+# Credentials come from the environment. Nothing real is committed; the values
+# below are development defaults for a database that holds no production data.
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: orion-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orion}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orion_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-orion}
+      # Deterministic collation so index and ordering behaviour matches CI.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      # Host port is configurable so it can dodge an existing local Postgres.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - orion-pgdata:/var/lib/postgresql/data
+      # Creates the separate test database on first initialisation, so
+      # integration tests never touch development data.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Nothing should run migrations against a database that is still starting.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-orion} -d ${POSTGRES_DB:-orion}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  orion-pgdata:
+    name: orion-pgdata
