@@ -805,6 +805,74 @@ describe("migration tooling stays out of the request path", () => {
     }
   });
 
+  it("no request-time page, layout or route reaches migration tooling", () => {
+    // Server components and route handlers run per request with the caller's
+    // session in scope. An unscoped read of every user reachable from one is an
+    // IDOR with no check to bypass, so this covers app/ whether or not the file
+    // is marked "use client".
+    const requestEntries = Array.from(graph.keys()).filter(
+      (f) =>
+        f.startsWith("app/") &&
+        /\/(page|layout|route|template|error|loading|not-found)\.tsx?$/.test(f)
+    );
+    expect(requestEntries.length).toBeGreaterThan(0);
+
+    const reachable = closure(requestEntries);
+    expect(migrationModules.filter((f) => reachable.has(f))).toEqual([]);
+  });
+
+  it("no application repository or service reaches migration tooling", () => {
+    // The actor-scoped repositories are the request path's data layer. If one
+    // of them imported the unscoped reader, every caller would inherit it.
+    const appDataLayer = Array.from(graph.keys()).filter(
+      (f) =>
+        f.startsWith("lib/repositories/") ||
+        f.startsWith("lib/services/") ||
+        f.startsWith("lib/server/")
+    );
+    expect(appDataLayer.length).toBeGreaterThan(0);
+
+    const reachable = closure(appDataLayer);
+    expect(migrationModules.filter((f) => reachable.has(f))).toEqual([]);
+  });
+
+  it("migration tooling does not import the application's request-path layers", () => {
+    // The other direction. Operator tooling reusing an actor-scoped repository
+    // would need an actor it does not have, and reusing a server action would
+    // put a public endpoint in a migration.
+    const offenders: string[] = [];
+    for (const file of migrationModules) {
+      for (const dep of graph.get(file)?.imports ?? []) {
+        if (
+          dep.startsWith("lib/repositories/") ||
+          dep.startsWith("lib/services/") ||
+          dep.startsWith("lib/actions/") ||
+          graph.get(dep)?.isAction
+        ) {
+          offenders.push(`${file} -> ${dep}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("keeps Appwrite as the runtime source: no request path imports lib/db", () => {
+    // Phase 6B populates PostgreSQL but does not cut over to it. If a server
+    // action or a page started reading lib/db, the cutover would have happened
+    // silently.
+    const requestEntries = Array.from(graph.values())
+      .filter((m) => m.isAction || m.isClient || m.file.startsWith("app/"))
+      .map((m) => m.file);
+
+    const reachable = closure(requestEntries);
+    const dbModules = Array.from(graph.keys()).filter(
+      (f) => f.startsWith("lib/db/") && !f.endsWith("errors.ts")
+    );
+
+    expect(dbModules.length).toBeGreaterThan(0);
+    expect(dbModules.filter((f) => reachable.has(f))).toEqual([]);
+  });
+
   it("every migration module that performs I/O declares server-only", () => {
     for (const file of migrationModules) {
       // mapping.ts is pure — no clients, no environment, no I/O — so it stays

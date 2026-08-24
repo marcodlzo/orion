@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 
 import { closePool, withTransaction } from "../pool";
 import { ConstraintViolationError } from "../errors";
+import { requireTestDatabase } from "../test-database";
 import {
   countBankingCustomers,
   findCustomerByAuthId,
@@ -27,11 +28,7 @@ import { query } from "../pool";
  */
 
 beforeAll(async () => {
-  const url = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
-  if (!url) {
-    throw new Error("TEST_DATABASE_URL must be set; these tests must not skip.");
-  }
-  process.env.DATABASE_URL = url;
+  requireTestDatabase();
 });
 
 afterAll(async () => {
@@ -57,6 +54,8 @@ const account = (customerId: string, overrides: Partial<Parameters<typeof upsert
   mask: "0000",
   accountType: "depository",
   accountSubtype: "checking",
+  currency: "USD",
+  metadataKnown: true,
   ...overrides,
 });
 
@@ -279,5 +278,90 @@ describe("listing for verification", () => {
 
     const accounts = await listLinkedAccounts();
     expect(accounts).toEqual([]);
+  });
+});
+
+/**
+ * NON-DESTRUCTIVE RE-RUN.
+ *
+ * The naive `ON CONFLICT DO UPDATE SET display_name = EXCLUDED.display_name`
+ * overwrote a correct account name with "Linked account" whenever a re-run
+ * happened during a Plaid outage. Re-running is supposed to be safe.
+ */
+describe("linked accounts — metadata preservation", () => {
+  const degraded = (customerId: string) =>
+    account(customerId, {
+      displayName: "Linked account",
+      officialName: null,
+      mask: null,
+      accountType: null,
+      accountSubtype: null,
+      metadataKnown: false,
+    });
+
+  it("does not overwrite good metadata when the provider was unreachable", async () => {
+    const { row: c } = await upsertBankingCustomer(customer());
+    const first = await upsertLinkedAccount(account(c.id));
+
+    const second = await upsertLinkedAccount(degraded(c.id));
+
+    expect(second.created).toBe(false);
+    expect(second.row.id).toBe(first.row.id);
+    expect(second.row.display_name).toBe("Plaid Checking");
+    expect(second.row.official_name).toBe("Plaid Gold Standard Checking");
+    expect(second.row.mask).toBe("0000");
+    expect(second.row.account_type).toBe("depository");
+    expect(second.row.account_subtype).toBe("checking");
+  });
+
+  it("writes the placeholder on a FIRST insert, because display_name is NOT NULL", async () => {
+    const { row: c } = await upsertBankingCustomer(customer());
+
+    const { row, created } = await upsertLinkedAccount(degraded(c.id));
+
+    expect(created).toBe(true);
+    expect(row.display_name).toBe("Linked account");
+  });
+
+  it("updates metadata when the provider did answer", async () => {
+    const { row: c } = await upsertBankingCustomer(customer());
+    await upsertLinkedAccount(degraded(c.id));
+
+    const { row } = await upsertLinkedAccount(account(c.id));
+
+    expect(row.display_name).toBe("Plaid Checking");
+    expect(row.mask).toBe("0000");
+  });
+
+  it("preserves the row identity and creation time across both paths", async () => {
+    const { row: c } = await upsertBankingCustomer(customer());
+    const first = await upsertLinkedAccount(account(c.id));
+
+    await upsertLinkedAccount(degraded(c.id));
+    const { row } = await upsertLinkedAccount(account(c.id));
+
+    expect(row.id).toBe(first.row.id);
+    expect(row.created_at).toEqual(first.row.created_at);
+  });
+
+  it("does not overwrite currency when metadata is untrusted", async () => {
+    const { row: c } = await upsertBankingCustomer(customer());
+    await upsertLinkedAccount(account(c.id));
+
+    const { row } = await upsertLinkedAccount(degraded(c.id));
+
+    expect(row.currency).toBe("USD");
+  });
+
+  it("rejects a currency the schema does not accept", async () => {
+    const { row: c } = await upsertBankingCustomer(customer());
+
+    const error = await upsertLinkedAccount(
+      account(c.id, { currency: "GBP" })
+    ).catch((e: unknown) => e);
+
+    // The CHECK is the last line of defence; enrichment refuses non-USD first.
+    expect(error).toBeInstanceOf(ConstraintViolationError);
+    expect((error as ConstraintViolationError).sqlState).toBe("23514");
   });
 });

@@ -1,8 +1,9 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeAll } from "vitest";
 
 import { checkDatabase } from "./health";
 import { closePool } from "./pool";
 import { DatabaseUnavailableError } from "./errors";
+import { requireTestDatabase } from "./test-database";
 
 /**
  * Database health primitive, against a real server.
@@ -12,17 +13,21 @@ import { DatabaseUnavailableError } from "./errors";
  * it behaves when the network does something real.
  */
 
-const originalUrl = process.env.DATABASE_URL;
+let testUrl: string;
+
+beforeAll(() => {
+  // Never falls back to DATABASE_URL — see lib/db/test-database.ts.
+  testUrl = requireTestDatabase();
+});
 
 afterEach(async () => {
   await closePool();
-  process.env.DATABASE_URL = originalUrl;
+  process.env.DATABASE_URL = testUrl;
 });
 
 describe("checkDatabase", () => {
   it("reports healthy against a reachable database", async () => {
-    process.env.DATABASE_URL =
-      process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
+    process.env.DATABASE_URL = testUrl;
     await closePool();
 
     const health = await checkDatabase();

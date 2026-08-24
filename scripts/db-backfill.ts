@@ -19,15 +19,24 @@ function render(report: BackfillReport): void {
   const mode = report.dryRun ? "DRY RUN — nothing was written" : "COMMITTED";
   const line = "─".repeat(64);
 
+  const { users, banks } = report.source;
+
   console.log(line);
   console.log(`Appwrite → PostgreSQL backfill   [${mode}]`);
   console.log(line);
-  console.log(`source            ${report.source.users} users, ${report.source.banks} bank documents`);
+  // Source evidence, not just counts: "12 customers migrated" is equally true
+  // of a complete read and of one that stopped after the first page.
+  console.log(
+    `source users      ${users.scanned}/${users.reportedTotal} scanned over ${users.pages} page(s)${users.complete ? "" : "   *** INCOMPLETE ***"}`
+  );
+  console.log(
+    `source banks      ${banks.scanned}/${banks.reportedTotal} scanned over ${banks.pages} page(s)${banks.complete ? "" : "   *** INCOMPLETE ***"}`
+  );
   console.log(
     `customers         ${report.customers.created} created, ${report.customers.existing} already present, ${report.customers.failed} failed`
   );
   console.log(
-    `linked accounts   ${report.accounts.created} created, ${report.accounts.updated} updated, ${report.accounts.failed} failed`
+    `linked accounts   ${report.accounts.created} created, ${report.accounts.updated} updated, ${report.accounts.blocked} blocked, ${report.accounts.failed} failed`
   );
   console.log(
     `enrichment        ${report.enrichment.succeeded} ok, ${report.enrichment.failed} failed`
@@ -35,15 +44,29 @@ function render(report: BackfillReport): void {
 
   if (report.skipped.length) {
     console.log(`\nskipped by mapping (${report.skipped.length}) — these will NOT migrate:`);
-    for (const s of report.skipped) console.log(`  ${s.kind} ${s.id}: ${s.reason}`);
+    for (const s of report.skipped) {
+      console.log(`  ${s.kind} ${s.id}: [${s.code}] ${s.reason}`);
+    }
   }
 
-  if (report.enrichmentFailures.length) {
+  const degradedOnly = report.enrichmentFailures.filter((f) => !f.blocked);
+  const blockedByProvider = report.enrichmentFailures.filter((f) => f.blocked);
+
+  if (degradedOnly.length) {
     console.log(
-      `\nprovider metadata unavailable (${report.enrichmentFailures.length}) — migrated with placeholder names, re-run to fill in:`
+      `\nprovider metadata unavailable (${degradedOnly.length}) — MIGRATED with placeholder names; a re-run fills them in and will not overwrite good data:`
     );
-    for (const f of report.enrichmentFailures) {
-      console.log(`  ${f.legacyBankDocumentId}: ${f.reason}`);
+    for (const f of degradedOnly) {
+      console.log(`  ${f.legacyBankDocumentId}: [${f.code}] ${f.reason}`);
+    }
+  }
+
+  if (blockedByProvider.length) {
+    console.log(
+      `\nNOT MIGRATED (${blockedByProvider.length}) — migrating these would require inventing a fact:`
+    );
+    for (const f of blockedByProvider) {
+      console.log(`  ${f.legacyBankDocumentId}: [${f.code}] ${f.reason}`);
     }
   }
 
@@ -53,6 +76,11 @@ function render(report: BackfillReport): void {
   }
 
   console.log(line);
+  if (!report.source.complete) {
+    console.log(
+      "SOURCE READ WAS INCOMPLETE. Do not treat this run as a complete migration."
+    );
+  }
   if (report.dryRun) {
     console.log("Nothing was written. Re-run with --commit to apply.");
   }
@@ -69,10 +97,11 @@ async function main(): Promise<number> {
   const report = await runBackfill({ dryRun: !commit });
   render(report);
 
-  // A failed write is an error even though the tool completed. Skipped and
-  // unenriched records are reported but do not fail the command: they are
-  // expected outcomes an operator decides about.
-  return report.failures.length > 0 ? 1 : 0;
+  // A failed write is an error even though the tool completed, and so is a
+  // short source read — a run over partial data must not look successful.
+  // Skipped and degraded records are reported but do not fail the command:
+  // they are expected outcomes an operator decides about.
+  return report.failures.length > 0 || !report.source.complete ? 1 : 0;
 }
 
 main()

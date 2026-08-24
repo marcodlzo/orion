@@ -67,7 +67,12 @@ describe("planMigration — customers", () => {
 
     expect(customers).toHaveLength(0);
     expect(skipped).toEqual([
-      { kind: "user", id: "orphan", reason: expect.stringContaining("missing userId") },
+      {
+        kind: "user",
+        id: "orphan",
+        code: "MISSING_AUTH_ID",
+        reason: expect.stringContaining("missing userId"),
+      },
     ]);
   });
 
@@ -83,7 +88,7 @@ describe("planMigration — customers", () => {
     expect(customers[0].appwriteUserDocumentId).toBe("doc-a");
     expect(skipped).toHaveLength(1);
     expect(skipped[0]).toMatchObject({ kind: "user", id: "doc-b" });
-    expect(skipped[0].reason).toContain("duplicate auth id");
+    expect(skipped[0].code).toBe("DUPLICATE_AUTH_ID");
   });
 
   it("trims surrounding whitespace rather than migrating it", () => {
@@ -159,7 +164,7 @@ describe("planMigration — accounts", () => {
     expect(skipped[0].reason).toContain("missing accountId");
   });
 
-  it("keeps the first of two links to the same account by the same owner", () => {
+  it("keeps one of two links to the same account by the same owner", () => {
     const { accounts, skipped } = planMigration(
       [user()],
       [bank({ $id: "bank-a" }), bank({ $id: "bank-b" })]
@@ -167,7 +172,14 @@ describe("planMigration — accounts", () => {
 
     expect(accounts).toHaveLength(1);
     expect(accounts[0].legacyAppwriteBankDocumentId).toBe("bank-a");
-    expect(skipped[0]).toMatchObject({ kind: "bank", id: "bank-b" });
+    expect(skipped[0]).toMatchObject({
+      kind: "bank",
+      id: "bank-b",
+      code: "DUPLICATE_OWNER_ACCOUNT",
+    });
+    // The rule is named in the reason, not left for the reader to infer.
+    expect(skipped[0].reason).toContain("bank-a");
+    expect(skipped[0].reason).toContain("lowest document id");
   });
 
   it("allows two customers to link the same provider account", () => {
@@ -299,6 +311,19 @@ describe("planMigration — reporting", () => {
     expect(planMigration(users, banks)).toEqual(planMigration(users, banks));
   });
 
+  it("gives every skip a machine-readable code", () => {
+    const { skipped } = planMigration(
+      [user({ $id: "doc-a", userId: "" }), user({ $id: "doc-b", userId: "auth-b" })],
+      [bank({ $id: "bank-x", userId: "ghost" }), bank({ $id: "bank-y", accountId: "" })]
+    );
+
+    // Prose is for humans; the code is what a script can branch on without
+    // pattern-matching an English sentence that may be reworded.
+    for (const record of skipped) {
+      expect(record.code).toMatch(/^[A-Z_]+$/);
+    }
+  });
+
   it("does not mutate its inputs", () => {
     const users = [user()];
     const banks = [bank()];
@@ -309,3 +334,115 @@ describe("planMigration — reporting", () => {
     expect(JSON.stringify({ users, banks })).toBe(before);
   });
 });
+
+/**
+ * ORDER INDEPENDENCE.
+ *
+ * Appwrite does not promise a document order, and "whichever arrived first
+ * wins" would let the same dataset migrate differently on two runs — with both
+ * runs reporting success. Every conflict is therefore tested in every
+ * permutation, and the accepted mapping and the reported conflicts must be
+ * identical each time.
+ */
+describe("planMigration — determinism under permutation", () => {
+  /** All orderings of a small array. */
+  const permutations = <T,>(items: T[]): T[][] => {
+    if (items.length <= 1) return [items];
+    const out: T[][] = [];
+    for (let i = 0; i < items.length; i += 1) {
+      const rest = [...items.slice(0, i), ...items.slice(i + 1)];
+      for (const tail of permutations(rest)) out.push([items[i], ...tail]);
+    }
+    return out;
+  };
+
+  it("enumerates the permutations it claims to test", () => {
+    expect(permutations([1, 2, 3])).toHaveLength(6);
+  });
+
+  it("resolves duplicate auth ids identically in every order", () => {
+    const users = [
+      user({ $id: "doc-c", userId: "auth-1" }),
+      user({ $id: "doc-a", userId: "auth-1" }),
+      user({ $id: "doc-b", userId: "auth-1" }),
+    ];
+
+    const results = permutations(users).map((order) => planMigration(order, []));
+
+    for (const result of results) {
+      expect(result.customers).toEqual(results[0].customers);
+      expect([...result.skipped].sort(bySkipId)).toEqual(
+        [...results[0].skipped].sort(bySkipId)
+      );
+    }
+    // And the winner is the stated rule, not an accident of input order.
+    expect(results[0].customers[0].appwriteUserDocumentId).toBe("doc-a");
+    expect(results[0].skipped.map((s) => s.id).sort()).toEqual(["doc-b", "doc-c"]);
+  });
+
+  it("resolves duplicate owner/account links identically in every order", () => {
+    const banks = [
+      bank({ $id: "bank-c" }),
+      bank({ $id: "bank-a" }),
+      bank({ $id: "bank-b" }),
+    ];
+
+    const results = permutations(banks).map((order) => planMigration([user()], order));
+
+    for (const result of results) {
+      expect(result.accounts).toEqual(results[0].accounts);
+      expect([...result.skipped].sort(bySkipId)).toEqual(
+        [...results[0].skipped].sort(bySkipId)
+      );
+    }
+    expect(results[0].accounts[0].legacyAppwriteBankDocumentId).toBe("bank-a");
+  });
+
+  it("produces the same plan for a mixed dataset in every order", () => {
+    const users = [
+      user({ $id: "u-b", userId: "auth-2" }),
+      user({ $id: "u-a", userId: "auth-1" }),
+      user({ $id: "u-c", userId: "auth-1" }),
+    ];
+    const banks = [
+      bank({ $id: "b-b", userId: "u-a", accountId: "acct-1" }),
+      bank({ $id: "b-a", userId: "u-a", accountId: "acct-1" }),
+      bank({ $id: "b-c", userId: "u-b", accountId: "acct-2" }),
+    ];
+
+    const baseline = planMigration(users, banks);
+
+    for (const userOrder of permutations(users)) {
+      for (const bankOrder of permutations(banks)) {
+        const result = planMigration(userOrder, bankOrder);
+        expect(result.customers).toEqual(baseline.customers);
+        expect(result.accounts).toEqual(baseline.accounts);
+        expect([...result.skipped].sort(bySkipId)).toEqual(
+          [...baseline.skipped].sort(bySkipId)
+        );
+      }
+    }
+  });
+
+  it("emits customers and accounts in a stable order", () => {
+    const users = [
+      user({ $id: "u-c", userId: "auth-c" }),
+      user({ $id: "u-a", userId: "auth-a" }),
+      user({ $id: "u-b", userId: "auth-b" }),
+    ];
+
+    const forward = planMigration(users, []);
+    const reversed = planMigration([...users].reverse(), []);
+
+    // Not merely equal as sets — equal as sequences, so a diff of two runs is
+    // empty rather than a reshuffle.
+    expect(forward.customers.map((c) => c.appwriteUserDocumentId)).toEqual([
+      "u-a",
+      "u-b",
+      "u-c",
+    ]);
+    expect(reversed.customers).toEqual(forward.customers);
+  });
+});
+
+const bySkipId = (a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id);

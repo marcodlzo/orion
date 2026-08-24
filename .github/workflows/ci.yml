@@ -59,8 +59,12 @@ jobs:
       DWOLLA_KEY: ci-dwolla-key
       DWOLLA_SECRET: ci-dwolla-secret
       DWOLLA_ENV: sandbox
-      # Same database for both: CI starts from an empty server every run.
-      DATABASE_URL: postgresql://orion:orion_ci_password@localhost:5432/orion_test
+      # TEST_DATABASE_URL only. DATABASE_URL is deliberately NOT set at job
+      # scope: the database suites truncate tables and refuse to run when both
+      # variables resolve to the same server, which is what stops a developer
+      # from wiping their development database. CI must satisfy that same rule
+      # rather than be excused from it, so DATABASE_URL is scoped to the one
+      # step that needs it — the migration run.
       TEST_DATABASE_URL: postgresql://orion:orion_ci_password@localhost:5432/orion_test
 
     steps:
@@ -99,8 +103,11 @@ jobs:
           exit 1
 
       # Proves migrations apply to a completely empty database, every run.
+      # DATABASE_URL is scoped to this step alone — see the env note above.
       - name: Apply migrations
         run: npm run db:migrate
+        env:
+          DATABASE_URL: postgresql://orion:orion_ci_password@localhost:5432/orion_test
 
       - name: Database integration tests
         run: npm run test:db

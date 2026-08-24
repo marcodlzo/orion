@@ -61,6 +61,21 @@ npm run db:backfill:commit     # actually write
 npm run db:verify              # compare both stores, exit non-zero on drift
 ```
 
+### Running the tests
+
+```bash
+npm test                       # unit; hermetic, no database
+TEST_DATABASE_URL=... npm run test:db
+```
+
+`test:db` **requires** `TEST_DATABASE_URL` and never falls back to
+`DATABASE_URL`. These suites `TRUNCATE`, and an unset variable must stop the run
+rather than pick a target on its own — the earlier fallback would have let a
+developer with `.env.local` in their shell wipe their development database while
+the suite reported green. The guard also refuses when both variables resolve to
+the same host/port/database, and when the database name does not end in
+`_test`.
+
 Both commands need `DATABASE_URL` plus the Appwrite and Plaid variables from
 `.env.local`. They are operator commands run from a shell; they are not
 reachable from the application.
@@ -90,17 +105,39 @@ longer obvious which store is authoritative, and the answer differs per record.
 ### Re-running is safe
 
 Both repositories upsert. Re-run freely — after a Plaid outage, after fixing a
-mapping bug, after adding a column. Existing rows are updated; nothing is
-duplicated.
+mapping bug, after adding a column.
 
-Two details make this true rather than merely intended:
+Idempotency here means more than "the row count did not change". Across any
+number of runs:
 
-- Customers conflict on `appwrite_auth_id` and the update is a no-op assignment,
-  so `xmax = 0` still reports correctly whether the row was inserted.
-- Accounts conflict on `(customer_id, provider, external_account_id)` and update
-  **display metadata only**. `legacy_appwrite_bank_document_id` is written with
-  `COALESCE(existing, excluded)`, so a bridge that is already recorded is never
-  cleared by a later run that lacks it.
+- **UUIDs are stable.** `id` is never rewritten, so anything holding a reference
+  keeps working.
+- **`created_at` is stable.** It is the only record of when a customer was first
+  migrated.
+- **Identity columns are never rewritten.** `customer_id` and
+  `external_account_id` are the row's identity; a change there means the source
+  moved, which `db:verify` reports rather than absorbing.
+- **The legacy bridge is never cleared.** `legacy_appwrite_bank_document_id` is
+  written with `COALESCE(existing, excluded)`, so a later run that lacks it does
+  not erase it.
+- **Good metadata is never degraded.** See below.
+
+#### A re-run during a provider outage must not destroy data
+
+This is the one that bites. The obvious upsert —
+`ON CONFLICT DO UPDATE SET display_name = EXCLUDED.display_name` — overwrites a
+correct account name with the placeholder `"Linked account"` whenever a re-run
+happens while Plaid is unreachable. The row count is unchanged, so a
+count-based idempotency check reports success while the data is quietly worse.
+
+So the repository takes `metadataKnown`. When enrichment failed, every metadata
+column keeps the value it already had; the placeholder is written **only** on a
+first insert, where `display_name NOT NULL` requires something. The provider
+failure is still reported either way.
+
+Proven by `repositories.db.test.ts` (repository level) and `backfill.db.test.ts`
+(end to end), both against real PostgreSQL, and both verified to fail when the
+`CASE WHEN` is reverted to the naive assignment.
 
 ---
 
@@ -109,15 +146,42 @@ Two details make this true rather than merely intended:
 Nothing is dropped silently. Every source record is either migrated or listed in
 `skipped` with a reason.
 
-**Skips** are records that *cannot* migrate, decided before any database call:
+**Skips** are records that *cannot* migrate, decided before any database call.
+Each carries a machine-readable `code` as well as prose, so a script can branch
+on it without pattern-matching an English sentence:
 
-| Reason | Meaning |
+| Code | Meaning |
 |---|---|
-| missing `userId` | A user document with no auth account — a partial-signup artefact, not a customer. |
-| duplicate auth id | Two user documents claiming one auth account. The unique index would reject the second. |
-| owner has no migratable user record | The bank's owner was deleted or was itself skipped; the foreign key would reject it. |
-| missing `accountId` | No provider account to link. |
-| duplicate account for owner | The same provider account linked twice by one customer. First occurrence wins. |
+| `MISSING_AUTH_ID` | A user document with no auth account — a partial-signup artefact, not a customer. |
+| `DUPLICATE_AUTH_ID` | Two user documents claiming one auth account. The unique index would reject the second. |
+| `OWNER_NOT_MIGRATABLE` | The bank's owner was deleted or was itself skipped; the foreign key would reject it. |
+| `MISSING_OWNER` | The relationship is absent or unreadable. |
+| `MISSING_ACCOUNT_ID` | No provider account to link. |
+| `DUPLICATE_OWNER_ACCOUNT` | The **same customer** linked the same provider account twice. |
+| `MISSING_DOCUMENT_ID` | The document has no `$id`. |
+
+#### Conflicts resolve the same way every run
+
+Appwrite does not promise a document order. "Whichever arrived first wins" would
+let the same dataset migrate differently on two runs, with both reporting
+success and the difference invisible.
+
+So the source is **sorted by document id before anything is decided**, and the
+rule is stated in the skip reason: **lowest document id wins**. Arbitrary, but
+stable, reproducible, and reported — the losing record names the winner, so a
+human can judge whether the tie-break picked the right one.
+
+`mapping.test.ts` runs every conflict case through all permutations of its
+input and asserts the accepted mappings and reported conflicts are identical.
+
+#### Joint accounts are not conflicts
+
+Two *different* customers linking the same provider account is a joint account
+and is allowed — by the mapper and by the schema, whose unique index is
+`(customer_id, provider, external_account_id)`, not `(provider, account)`.
+
+Only the *same* customer linking it twice is a duplicate. The distinction is
+deliberate and is not to be "fixed" by tightening the index.
 
 A skip is a finding, not an error. The command still exits `0` — deciding what
 to do about a malformed legacy record is an operator's call.
@@ -125,16 +189,28 @@ to do about a malformed legacy record is an operator's call.
 **Write failures** are different: they exit `1`. Because the run is one
 transaction, a write failure means nothing was committed.
 
-**Enrichment failures** are reported separately and are *not* fatal. If Plaid
-cannot be reached for an Item — expired credentials, an outage — that account
-still migrates, with `display_name = "Linked account"` and null metadata. The
-link is real data; it must not be lost because a provider was unavailable. A
-later re-run fills the real values in.
+**Enrichment failures** split in two, because they call for different actions:
 
-Failure reasons carry a classification (`name / code / constraint`), never the
-driver's message. A constraint violation quotes the offending row back at you,
-and a Plaid error echoes the request that caused it — which contains the access
-token.
+| Code | Blocking? | Meaning |
+|---|---|---|
+| `PROVIDER_ERROR` | no | Plaid unreachable or the Item needs re-auth. Migrates with placeholder metadata; a re-run fills it in. |
+| `NO_ACCESS_TOKEN` | no | The legacy record has no token. The link is still real data. |
+| `SOURCE_ACCOUNT_NOT_FOUND` | no | The account is not on the Item any more. Migrates degraded; `db:verify` keeps flagging it. |
+| `AMBIGUOUS_PROVIDER_ACCOUNT` | **yes** | Two Plaid accounts share the id. Picking one would be a guess. |
+| `UNSUPPORTED_CURRENCY` | **yes** | Not USD. Writing `'USD'` to satisfy the CHECK would record a false fact. |
+
+Non-blocking failures still migrate the row — the link is real data and must not
+be lost because a provider was unavailable. Blocking failures write no row at
+all, because writing one would require inventing something.
+
+**Currency comes from the provider**, never assumed. It is read from the
+account's `iso_currency_code` (falling back to `unofficial_currency_code`).
+The balance *amounts* on the same object are deliberately not read.
+
+Failure reasons carry a classification (`name / SQLSTATE / constraint`), never
+the driver's message. A constraint violation quotes the offending row back at
+you, and a Plaid error echoes the request that caused it — which contains the
+access token.
 
 ---
 
@@ -202,9 +278,43 @@ want an actor-scoped repository instead — see `lib/repositories/`.
 | `lib/db/repositories/*.ts` | Idempotent upserts against PostgreSQL. |
 | `scripts/db-backfill.ts`, `scripts/db-verify.ts` | The operator entry points. |
 
+### Reading the source completely
+
 Cursor pagination, not offset: offset pagination silently skips or repeats rows
 when the underlying set changes between pages, which during a migration means
-quietly losing a customer's account.
+quietly losing a customer's account. The page size is set explicitly (100, the
+maximum) rather than inherited from Appwrite's default of 25.
+
+**Non-progress throws.** An earlier version broke out of the loop when the
+cursor failed to advance, turning a provider fault into a short read — the
+caller then saw a small, well-formed dataset with no way to know it was
+truncated. Now a stalled cursor, a repeated document, or a total that exceeds
+what was actually walked all raise `InfrastructureError` and stop the run.
+
+Every read returns evidence, not just documents:
+
+```
+scanned  reportedTotal  pages  complete
+```
+
+Both commands print it, and both exit non-zero when `complete` is false.
+`db:verify` additionally records `incomplete-source-scan` as drift, so `ok` can
+never be true over a partial read — a comparison against a short read would
+report every missed record as a PostgreSQL orphan.
+
+---
+
+## What each claim rests on
+
+| Claim | Evidence |
+|---|---|
+| **idempotent** | Real-PostgreSQL re-runs asserting stable `id`, stable `created_at`, no duplicate rows, and preserved metadata — not merely that `ON CONFLICT` is present. `backfill.db.test.ts`, `repositories.db.test.ts`. |
+| **atomic** | A real CHECK violation mid-run leaves *zero* rows, including customers written before the failure; and a second statement after the abort reports `25P02` rather than continuing. `backfill.db.test.ts` → "a real PostgreSQL failure". |
+| **dry-run equivalent** | Dry run and commit call the *same* repository functions in the *same* transaction; only the ending differs. Proven by running both from the same initial state against real PostgreSQL and comparing every counter, plus a foreign-key violation that fires *during* the dry run. |
+| **no secret leakage** | Unique sentinel values for access token, funding-source URL, processor token and DB password, asserted absent from stored rows, reports, error messages, error stacks and JSON across success, provider failure, DB failure, dry run and verification. The absence of an `access_token` column is *not* treated as proof. |
+| **migration complete** | `scanned` vs `reportedTotal` vs `pages` for both collections, with a short read throwing and a non-advancing cursor throwing. Multi-page reads are tested, including the exact-multiple boundary. |
+| **verification independent** | The verifier's dependency list contains no backfill input; it re-derives expectations from the source via `planMigration`. Tested by changing the source under a previously-correct PostgreSQL state and asserting drift appears. |
+| **runtime unchanged** | Import-boundary tests proving no server action, client component, `app/` page/layout/route, or application repository/service reaches `lib/migration/` **or** `lib/db/` at any depth. Mutation-tested: planting either import fails the suite. |
 
 ---
 

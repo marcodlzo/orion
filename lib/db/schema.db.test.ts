@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { Pool } from "pg";
 
 import { ConstraintViolationError, toDatabaseError } from "./errors";
+import { requireTestDatabase } from "./test-database";
 
 /**
  * SCHEMA INTEGRATION TESTS — real PostgreSQL, no mocks.
@@ -17,17 +18,12 @@ import { ConstraintViolationError, toDatabaseError } from "./errors";
  * skips reports green while proving nothing, which is worse than no suite.
  */
 
-const connectionString =
-  process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL ?? "";
-
 let pool: Pool;
 
 beforeAll(async () => {
-  if (!connectionString) {
-    throw new Error(
-      "TEST_DATABASE_URL (or DATABASE_URL) must be set. These tests require a real PostgreSQL; they must not be skipped."
-    );
-  }
+  // Requires TEST_DATABASE_URL and never falls back to DATABASE_URL: this file
+  // truncates tables, so it must not be able to guess a target.
+  const connectionString = requireTestDatabase();
   pool = new Pool({ connectionString, max: 4, connectionTimeoutMillis: 5_000 });
 
   // Fail loudly and early if migrations have not been applied.

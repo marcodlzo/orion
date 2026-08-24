@@ -19,8 +19,12 @@ function render(report: VerificationReport): void {
   console.log(line);
   console.log(`Appwrite ↔ PostgreSQL verification   ${report.checkedAt}`);
   console.log(line);
+  const { scan } = report.legacy;
   console.log(
     `legacy source     ${report.legacy.users} users, ${report.legacy.banks} bank documents`
+  );
+  console.log(
+    `source scan       users ${scan.users.scanned}/${scan.users.reportedTotal} (${scan.users.pages}p), banks ${scan.banks.scanned}/${scan.banks.reportedTotal} (${scan.banks.pages}p)${scan.complete ? "" : "   *** INCOMPLETE ***"}`
   );
   console.log(
     `expected          ${report.legacy.migratable.customers} customers, ${report.legacy.migratable.accounts} linked accounts`

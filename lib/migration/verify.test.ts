@@ -2,8 +2,22 @@ import { describe, expect, it } from "vitest";
 
 import type { BankingCustomerRow } from "../db/repositories/banking-customers.repository";
 import type { LinkedAccountRow } from "../db/repositories/linked-accounts.repository";
-import type { LegacyBankDocument, LegacyUserDocument } from "./appwrite-source";
+import type {
+  LegacyBankDocument,
+  LegacyUserDocument,
+  SourceScan,
+} from "./appwrite-source";
 import { verifyMigration, type VerifyDeps } from "./verify";
+
+/** A complete source read, the shape the reader returns when nothing was lost. */
+const scan = <T,>(documents: T[], over: Partial<SourceScan<T>> = {}): SourceScan<T> => ({
+  documents,
+  scanned: documents.length,
+  reportedTotal: documents.length,
+  pages: 1,
+  complete: true,
+  ...over,
+});
 
 const user = (over: Partial<LegacyUserDocument> = {}): LegacyUserDocument => ({
   $id: "user-doc-1",
@@ -50,8 +64,8 @@ const accountRow = (over: Partial<LinkedAccountRow> = {}): LinkedAccountRow =>
 
 function deps(over: Partial<VerifyDeps> = {}): VerifyDeps {
   return {
-    readUsers: async () => [user()],
-    readBanks: async () => [bank()],
+    readUsers: async () => scan([user()]),
+    readBanks: async () => scan([bank()]),
     listCustomers: async () => [customerRow()],
     listAccounts: async () => [accountRow()],
     ...over,
@@ -69,7 +83,7 @@ describe("verifyMigration — a matching migration", () => {
   it("reports the counts on both sides", async () => {
     const report = await verifyMigration(deps());
 
-    expect(report.legacy).toEqual({
+    expect(report.legacy).toMatchObject({
       users: 1,
       banks: 1,
       migratable: { customers: 1, accounts: 1 },
@@ -82,8 +96,8 @@ describe("verifyMigration — a matching migration", () => {
     // customer. Its absence from PostgreSQL is correct, not missing data.
     const report = await verifyMigration(
       deps({
-        readUsers: async () => [user(), user({ $id: "partial", userId: "" })],
-        readBanks: async () => [bank()],
+        readUsers: async () => scan([user(), user({ $id: "partial", userId: "" })]),
+        readBanks: async () => scan([bank()]),
       })
     );
 
@@ -128,10 +142,10 @@ describe("verifyMigration — missing data", () => {
   it("counts one drift entry per missing account, not one per customer", async () => {
     const report = await verifyMigration(
       deps({
-        readBanks: async () => [
+        readBanks: async () => scan([
           bank({ $id: "bank-a", accountId: "acct-a" }),
           bank({ $id: "bank-b", accountId: "acct-b" }),
-        ],
+        ]),
         listAccounts: async () => [],
       })
     );
@@ -287,7 +301,7 @@ describe("verifyMigration — independence from the backfill", () => {
     const afterNewSignup = await verifyMigration(
       deps({
         ...pg,
-        readUsers: async () => [user(), user({ $id: "user-doc-2", userId: "auth-2" })],
+        readUsers: async () => scan([user(), user({ $id: "user-doc-2", userId: "auth-2" })]),
       })
     );
 
@@ -301,14 +315,14 @@ describe("verifyMigration — independence from the backfill", () => {
   it("does not treat a joint account as drift", async () => {
     const report = await verifyMigration(
       deps({
-        readUsers: async () => [
+        readUsers: async () => scan([
           user({ $id: "doc-a", userId: "auth-a" }),
           user({ $id: "doc-b", userId: "auth-b" }),
-        ],
-        readBanks: async () => [
+        ]),
+        readBanks: async () => scan([
           bank({ $id: "bank-a", userId: "doc-a", accountId: "shared" }),
           bank({ $id: "bank-b", userId: "doc-b", accountId: "shared" }),
-        ],
+        ]),
         listCustomers: async () => [
           customerRow({
             id: "uuid-a",
@@ -346,7 +360,7 @@ describe("verifyMigration — report shape", () => {
   it("carries no provider credential into the report", async () => {
     const report = await verifyMigration(
       deps({
-        readBanks: async () => [bank({ accessToken: "access-sandbox-must-not-appear" })],
+        readBanks: async () => scan([bank({ accessToken: "access-sandbox-must-not-appear" })]),
         listAccounts: async () => [],
       })
     );
@@ -361,5 +375,110 @@ describe("verifyMigration — report shape", () => {
     expect(clean.ok).toBe(true);
     expect(dirty.ok).toBe(false);
     expect(dirty.drift.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * A verification over a partial source read is not a verification.
+ *
+ * Every record the walk missed looks exactly like a PostgreSQL row with no
+ * source — an orphan. The verifier would then report drift it invented, or
+ * worse, report `ok` because the small source happened to match a small target.
+ */
+describe("verifyMigration — source completeness", () => {
+  it("is not ok when the user scan was short", async () => {
+    const report = await verifyMigration(
+      deps({
+        readUsers: async () =>
+          scan([user()], { scanned: 1, reportedTotal: 90, complete: false }),
+      })
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.drift).toContainEqual({
+      category: "incomplete-source-scan",
+      id: "users",
+      detail: expect.stringContaining("90"),
+    });
+  });
+
+  it("is not ok when the bank scan was short", async () => {
+    const report = await verifyMigration(
+      deps({
+        readBanks: async () =>
+          scan([bank()], { reportedTotal: 12, complete: false }),
+      })
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.drift.some((d) => d.category === "incomplete-source-scan")).toBe(true);
+  });
+
+  it("carries the scan evidence into the report", async () => {
+    const report = await verifyMigration(
+      deps({
+        readUsers: async () => scan([user()], { pages: 4 }),
+        readBanks: async () => scan([bank()], { pages: 2 }),
+      })
+    );
+
+    expect(report.legacy.scan).toEqual({
+      users: { scanned: 1, reportedTotal: 1, pages: 4 },
+      banks: { scanned: 1, reportedTotal: 1, pages: 2 },
+      complete: true,
+    });
+  });
+
+  it("still reports ordinary drift alongside an incomplete scan", async () => {
+    const report = await verifyMigration(
+      deps({
+        readUsers: async () =>
+          scan([user()], { reportedTotal: 5, complete: false }),
+        listAccounts: async () => [],
+      })
+    );
+
+    const categories = report.drift.map((d) => d.category);
+    expect(categories).toContain("incomplete-source-scan");
+    expect(categories).toContain("missing-account");
+  });
+});
+
+/**
+ * The verifier re-derives expectations from the source. It never reads the
+ * backfill's counters, so it can contradict a backfill that reported success.
+ */
+describe("verifyMigration — independence, stated concretely", () => {
+  it("takes no backfill report as input", () => {
+    // Structural, not behavioural: there is no parameter through which a
+    // backfill's bookkeeping could reach the verifier.
+    const verifyDeps = deps();
+    expect(Object.keys(verifyDeps).sort()).toEqual([
+      "listAccounts",
+      "listCustomers",
+      "readBanks",
+      "readUsers",
+    ]);
+  });
+
+  it("detects a customer the backfill would have reported as written", async () => {
+    // The backfill's own counters would say "1 created". PostgreSQL disagrees.
+    const report = await verifyMigration(deps({ listCustomers: async () => [] }));
+
+    expect(report.ok).toBe(false);
+    expect(report.drift.map((d) => d.category)).toContain("missing-customer");
+  });
+
+  it("detects an identity bridge pointing at the wrong document", async () => {
+    const report = await verifyMigration(
+      deps({
+        listCustomers: async () => [
+          customerRow({ appwrite_user_document_id: "someone-else" }),
+        ],
+        listAccounts: async () => [],
+      })
+    );
+
+    expect(report.drift.map((d) => d.category)).toContain("mismatched-customer");
   });
 });

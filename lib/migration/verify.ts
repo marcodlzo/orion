@@ -14,6 +14,7 @@ import {
   readAllLegacyUsers,
   type LegacyBankDocument,
   type LegacyUserDocument,
+  type SourceScan,
 } from "./appwrite-source";
 import { planMigration } from "./mapping";
 
@@ -25,14 +26,25 @@ export type Drift = {
     | "orphan-account"
     | "mismatched-customer"
     | "mismatched-account"
-    | "unenriched-account";
+    | "unenriched-account"
+    | "incomplete-source-scan";
   id: string;
   detail: string;
 };
 
 export type VerificationReport = {
   checkedAt: string;
-  legacy: { users: number; banks: number; migratable: { customers: number; accounts: number } };
+  legacy: {
+    users: number;
+    banks: number;
+    migratable: { customers: number; accounts: number };
+    /** Pagination evidence. A verification over a short read proves nothing. */
+    scan: {
+      users: { scanned: number; reportedTotal: number; pages: number };
+      banks: { scanned: number; reportedTotal: number; pages: number };
+      complete: boolean;
+    };
+  };
   postgres: { customers: number; accounts: number };
   skippedBySource: number;
   drift: Drift[];
@@ -40,8 +52,8 @@ export type VerificationReport = {
 };
 
 export type VerifyDeps = {
-  readUsers: () => Promise<LegacyUserDocument[]>;
-  readBanks: () => Promise<LegacyBankDocument[]>;
+  readUsers: () => Promise<SourceScan<LegacyUserDocument>>;
+  readBanks: () => Promise<SourceScan<LegacyBankDocument>>;
   listCustomers: () => Promise<BankingCustomerRow[]>;
   listAccounts: () => Promise<LinkedAccountRow[]>;
 };
@@ -68,15 +80,33 @@ export const defaultVerifyDeps: VerifyDeps = {
 export async function verifyMigration(
   deps: VerifyDeps = defaultVerifyDeps
 ): Promise<VerificationReport> {
-  const [users, banks, pgCustomers, pgAccounts] = await Promise.all([
+  const [userScan, bankScan, pgCustomers, pgAccounts] = await Promise.all([
     deps.readUsers(),
     deps.readBanks(),
     deps.listCustomers(),
     deps.listAccounts(),
   ]);
 
+  const users = userScan.documents;
+  const banks = bankScan.documents;
   const expected = planMigration(users, banks);
   const drift: Drift[] = [];
+
+  // A comparison against a partial read is not a verification — every record
+  // the walk missed would look like a PostgreSQL row with no source, i.e. an
+  // orphan. Record it as drift so `ok` can never be true over a short read.
+  for (const [label, scan] of [
+    ["users", userScan],
+    ["banks", bankScan],
+  ] as const) {
+    if (!scan.complete) {
+      drift.push({
+        category: "incomplete-source-scan",
+        id: label,
+        detail: `read ${scan.scanned} of ${scan.reportedTotal} documents across ${scan.pages} page(s)`,
+      });
+    }
+  }
 
   // --- customers ----------------------------------------------------------
   const pgByAuthId = new Map(pgCustomers.map((c) => [c.appwrite_auth_id, c]));
@@ -182,6 +212,19 @@ export async function verifyMigration(
       migratable: {
         customers: expected.customers.length,
         accounts: expected.accounts.length,
+      },
+      scan: {
+        users: {
+          scanned: userScan.scanned,
+          reportedTotal: userScan.reportedTotal,
+          pages: userScan.pages,
+        },
+        banks: {
+          scanned: bankScan.scanned,
+          reportedTotal: bankScan.reportedTotal,
+          pages: bankScan.pages,
+        },
+        complete: userScan.complete && bankScan.complete,
       },
     },
     postgres: { customers: pgCustomers.length, accounts: pgAccounts.length },
