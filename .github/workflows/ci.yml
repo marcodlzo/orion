@@ -81,6 +81,26 @@ jobs:
           fi
           echo "Clean — no credential patterns in client output."
 
+      # Provider credentials must not reach the browser. accessToken and the
+      # Dwolla customer identifiers are now absent from client output entirely;
+      # this locks that in.
+      #
+      # fundingSourceUrl is deliberately NOT checked here: PaymentTransferForm
+      # still receives one because the browser orchestrates the transfer. That
+      # is a known, tracked defect and the check is added once the server owns
+      # transfer orchestration.
+      - name: Assert provider credentials are absent from client output
+        run: |
+          set -euo pipefail
+          fail=0
+          for name in accessToken processorToken dwollaCustomerId dwollaCustomerUrl; do
+            if grep -rIlF -- "$name" .next/static 2>/dev/null; then
+              echo "::error::'$name' found in client build output"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] && echo "Clean — no provider credential field reaches the client."
+
       - name: Assert no source maps are served to clients
         run: |
           set -euo pipefail

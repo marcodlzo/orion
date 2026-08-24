@@ -60,7 +60,11 @@ vi.mock("../server/dwolla", () => ({
   createDwollaCustomer: vi.fn(),
 }));
 
-import { getBank, getBankByAccountId, getLoggedInUser } from "./user.actions";
+import {
+  getBankForLegacyTransfer,
+  getCounterpartyBankForLegacyTransfer,
+  getLoggedInUser,
+} from "./user.actions";
 import { getOwnedBanks } from "../repositories/banks.repository";
 import { requireActor } from "../auth/actor";
 
@@ -166,20 +170,20 @@ beforeEach(() => {
 describe("A. getBank — cross-owner access is denied", () => {
   it("FIXED: Alice reading Bob's bank id raises NotFound", async () => {
     // BEFORE: returned Bob's full document including his Plaid access token.
-    await expect(getBank({ documentId: "bank-doc-bob" })).rejects.toBeInstanceOf(
+    await expect(getBankForLegacyTransfer({ documentId: "bank-doc-bob" })).rejects.toBeInstanceOf(
       NotFoundError
     );
   });
 
   it("Alice can still read her own bank", async () => {
-    const bank = await getBank({ documentId: "bank-doc-alice" });
+    const bank = await getBankForLegacyTransfer({ documentId: "bank-doc-alice" });
 
     expect(bank.$id).toBe("bank-doc-alice");
   });
 
   it("a missing bank and an unowned bank are indistinguishable", async () => {
-    const unowned = await getBank({ documentId: "bank-doc-bob" }).catch((e) => e);
-    const missing = await getBank({ documentId: "does-not-exist" }).catch((e) => e);
+    const unowned = await getBankForLegacyTransfer({ documentId: "bank-doc-bob" }).catch((e: unknown) => e);
+    const missing = await getBankForLegacyTransfer({ documentId: "does-not-exist" }).catch((e: unknown) => e);
 
     // Returning "forbidden" for an unowned record would confirm the id is real
     // and turn this action into an enumeration oracle.
@@ -189,7 +193,7 @@ describe("A. getBank — cross-owner access is denied", () => {
   });
 
   it("scopes ownership inside the datastore query, not after fetching", async () => {
-    await getBank({ documentId: "bank-doc-alice" });
+    await getBankForLegacyTransfer({ documentId: "bank-doc-alice" });
 
     const bankCall = listDocuments.mock.calls.find(
       (c: unknown[]) => c[1] === BANK_COLLECTION
@@ -201,7 +205,7 @@ describe("A. getBank — cross-owner access is denied", () => {
 
 describe("D. ownership compares the correct identifier", () => {
   it("REGRESSION: filters on USER.$id, never the auth account id", async () => {
-    await getBank({ documentId: "bank-doc-alice" });
+    await getBankForLegacyTransfer({ documentId: "bank-doc-alice" });
 
     const bankCall = listDocuments.mock.calls.find(
       (c: unknown[]) => c[1] === BANK_COLLECTION
@@ -254,7 +258,7 @@ describe("E. datastore failure is not reported as NotFound", () => {
       throw new Error("appwrite is down");
     });
 
-    const error = await getBank({ documentId: "bank-doc-alice" }).catch((e) => e);
+    const error = await getBankForLegacyTransfer({ documentId: "bank-doc-alice" }).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(InfrastructureError);
     expect(error).not.toBeInstanceOf(NotFoundError);
@@ -266,7 +270,7 @@ describe("F. unauthenticated callers fail before the repository runs", () => {
   it("getBank rejects and issues no query", async () => {
     cookieGet.mockReturnValue(undefined);
 
-    await expect(getBank({ documentId: "bank-doc-alice" })).rejects.toBeInstanceOf(
+    await expect(getBankForLegacyTransfer({ documentId: "bank-doc-alice" })).rejects.toBeInstanceOf(
       UnauthorizedError
     );
     expect(listDocuments).not.toHaveBeenCalled();
@@ -277,13 +281,13 @@ describe("counterparty lookup — deliberately not ownership scoped", () => {
   it("resolves a bank the actor does NOT own, by design", async () => {
     // Paying somebody requires reading their bank. Scoping this by ownership
     // would break transfers entirely.
-    const bank = await getBankByAccountId({ accountId: "plaid-account-bob" });
+    const bank = await getCounterpartyBankForLegacyTransfer({ accountId: "plaid-account-bob" });
 
     expect(bank.$id).toBe("bank-doc-bob");
   });
 
   it("DEFECT: still returns the counterparty's provider credentials", async () => {
-    const bank = await getBankByAccountId({ accountId: "plaid-account-bob" });
+    const bank = await getCounterpartyBankForLegacyTransfer({ accountId: "plaid-account-bob" });
 
     // Access control cannot fix this — the recipient genuinely must be
     // readable. Narrowing the response is the DTO phase; removing the
@@ -297,20 +301,39 @@ describe("counterparty lookup — deliberately not ownership scoped", () => {
     cookieGet.mockReturnValue(undefined);
 
     await expect(
-      getBankByAccountId({ accountId: "plaid-account-bob" })
+      getCounterpartyBankForLegacyTransfer({ accountId: "plaid-account-bob" })
     ).rejects.toBeInstanceOf(UnauthorizedError);
     expect(listDocuments).not.toHaveBeenCalled();
   });
 });
 
-describe("getLoggedInUser — DEFECT: raw document still crosses the boundary", () => {
-  it("DEFECT: returns ssn, dateOfBirth and address", async () => {
+describe("getLoggedInUser — FIXED: only the allowlisted DTO crosses", () => {
+  it("returns exactly the CurrentUserDTO shape", async () => {
     const user = await getLoggedInUser();
 
-    expect(user.ssn).toBe("111-11-1111");
-    expect(user.dateOfBirth).toBe("1990-01-01");
-    expect(user.address1).toBe("1 Alice Way");
-    // AFTER (DTO phase): SSN is not persisted at all and the response carries
-    // only what the rendering components display.
+    // Allowlist, not blacklist: this fails if the shape widens by even one
+    // field, which a per-field "expect(x).toBeUndefined()" would not catch.
+    expect(user).toEqual({
+      id: "user-doc-alice",
+      firstName: "Alice",
+      lastName: "Anderson",
+      email: "alice@example.com",
+    });
+  });
+
+  it("carries no identity or provider data from the source record", async () => {
+    const user = await getLoggedInUser();
+    const wire = JSON.stringify(user);
+
+    // Runtime output, not just the type: a mapper that spreads the record
+    // would satisfy TypeScript and still leak here.
+    for (const value of [
+      "111-11-1111",
+      "1990-01-01",
+      "1 Alice Way",
+      "dwolla-alice",
+    ]) {
+      expect(wire).not.toContain(value);
+    }
   });
 });

@@ -63,7 +63,7 @@ export const BankDropdown = ({
           <SelectLabel className="py-2 font-normal text-gray-500">
             Select a bank to display
           </SelectLabel>
-          {accounts.map((account: Account) => (
+          {accounts.map((account) => (
             <SelectItem
               key={account.id}
               value={account.appwriteItemId}

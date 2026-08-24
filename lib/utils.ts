@@ -131,7 +131,9 @@ export function getAccountTypeColors(type: AccountTypes) {
 }
 
 export function countTransactionCategories(
-  transactions: Transaction[]
+  // Only `category` is read, so this accepts any shape carrying one. Typing it
+  // as the raw Transaction forced callers to hold a raw document.
+  transactions: { category: string }[]
 ): CategoryCount[] {
   const categoryCounts: { [category: string]: number } = {};
   let totalCount = 0;

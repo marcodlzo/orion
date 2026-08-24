@@ -9,7 +9,10 @@ import * as z from "zod";
 
 import { createTransfer } from "@/lib/actions/dwolla.actions";
 import { createTransaction } from "@/lib/actions/transaction.actions";
-import { getBank, getBankByAccountId } from "@/lib/actions/user.actions";
+import {
+  getBankForLegacyTransfer,
+  getCounterpartyBankForLegacyTransfer,
+} from "@/lib/actions/user.actions";
 import { decryptId } from "@/lib/utils";
 
 import { BankDropdown } from "./BankDropdown";
@@ -54,10 +57,10 @@ const PaymentTransferForm = ({ accounts }: PaymentTransferFormProps) => {
 
     try {
       const receiverAccountId = decryptId(data.shareableId);
-      const receiverBank = await getBankByAccountId({
+      const receiverBank = await getCounterpartyBankForLegacyTransfer({
         accountId: receiverAccountId,
       });
-      const senderBank = await getBank({ documentId: data.senderBank });
+      const senderBank = await getBankForLegacyTransfer({ documentId: data.senderBank });
 
       const transferParams = {
         sourceFundingSourceUrl: senderBank.fundingSourceUrl,

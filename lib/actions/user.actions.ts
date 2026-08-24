@@ -9,13 +9,16 @@
 // through actor-scoped repository methods, and the ownership predicate is part
 // of the datastore query rather than a comparison performed afterwards.
 //
-// NOT yet fixed here:
-//  - responses are still raw documents, so PII and provider credentials still
-//    cross to the browser (DTO phase)
-//  - getBankByAccountId is a counterparty lookup and is deliberately not
-//    ownership scoped (see its comment)
-//  - createTransfer still accepts funding-source URLs from the browser
-//    (transfer-orchestration phase)
+// DATA MINIMISATION applies to the ordinary read paths: signIn, signUp and
+// getLoggedInUser return an allowlisted CurrentUserDTO, and SSN and date of
+// birth are no longer persisted at all.
+//
+// NOT yet fixed here — the two functions suffixed ForLegacyTransfer below
+// still return raw bank documents including provider credentials, because
+// PaymentTransferForm orchestrates the transfer in the browser and needs a
+// funding-source URL to do it. They are named for what they are rather than
+// wrapped in a DTO that would look safe while leaking the same capability.
+// Deleting them is the transfer-orchestration phase.
 
 import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
@@ -46,6 +49,7 @@ import {
   getOwnedBankByDocumentId,
 } from "../repositories/banks.repository";
 import { NotFoundError } from "../repositories/errors";
+import { toCurrentUserDTO } from "../dto/user.dto";
 
 /** PUBLIC AUTH ENTRY — requiring a session to sign in would be circular. */
 export const signIn = async ({ email, password }: signInProps) => {
@@ -61,7 +65,7 @@ export const signIn = async ({ email, password }: signInProps) => {
 
     const user = await findUserByAuthId(session.userId);
 
-    return parseStringify(user);
+    return parseStringify(toCurrentUserDTO(user));
   } catch (error) {
     console.error('Error', error);
   }
@@ -96,10 +100,16 @@ export const signUp = async ({ password, ...userData }: SignUpParams) => {
 
     const dwollaCustomerId = extractCustomerIdFromUrl(dwollaCustomerUrl);
 
-    // DEFECT (not this phase): userData still carries ssn and dateOfBirth, and
-    // both are persisted in plaintext.
+    // SSN and date of birth are request-scoped. Dwolla needed them above to
+    // create the customer; nothing in this application reads them afterwards,
+    // so they are never written to Appwrite. Named explicitly rather than
+    // deleted from a spread, so a future field is excluded by default.
+    const { ssn: _ssn, dateOfBirth: _dateOfBirth, ...persistable } = userData;
+    void _ssn;
+    void _dateOfBirth;
+
     const newUser = await createUserRecord({
-      ...userData,
+      ...persistable,
       userId: newUserAccount.$id,
       dwollaCustomerId,
       dwollaCustomerUrl,
@@ -114,9 +124,10 @@ export const signUp = async ({ password, ...userData }: SignUpParams) => {
       secure: true,
     });
 
-    return parseStringify(newUser);
+    return parseStringify(toCurrentUserDTO(newUser));
   } catch (error) {
-    console.error('Error', error);
+    // Never log the signup payload: it holds the SSN and date of birth.
+    console.error('Sign-up failed');
   }
 }
 
@@ -127,15 +138,14 @@ export const signUp = async ({ password, ...userData }: SignUpParams) => {
  * it to redirect to /sign-in. An infrastructure failure is rethrown rather than
  * flattened to null, so an outage does not present as "logged out".
  *
- * DEFECT (not this phase): still returns the raw user document, so ssn,
- * dateOfBirth and address cross to the browser.
+ * Returns an allowlisted CurrentUserDTO. The raw document is never serialized.
  */
 export async function getLoggedInUser() {
   try {
     const actor = await requireActor();
     const user = await findUserByAuthId(actor.authId);
 
-    return parseStringify(user);
+    return parseStringify(toCurrentUserDTO(user));
   } catch (error) {
     if (isUnauthenticated(error)) return null;
     throw error;
@@ -253,6 +263,8 @@ export const exchangePublicToken = async ({
 }
 
 /**
+ * LEGACY TRANSFER PATH — RETURNS PROVIDER CREDENTIALS TO THE BROWSER.
+ *
  * PROTECTED AND OWNERSHIP SCOPED.
  *
  * The query filters on document id AND owner together, so another user's bank
@@ -263,10 +275,14 @@ export const exchangePublicToken = async ({
  * Errors are no longer swallowed: a datastore outage surfaces as
  * InfrastructureError rather than as an indistinguishable undefined.
  *
- * DEFECT (not this phase): the response is the raw document, so the actor's own
- * access token and funding-source URL still reach the browser.
+ * DEFECT: the response is the raw document, so the actor's own Plaid access
+ * token and Dwolla funding-source URL reach the browser. This is NOT wrapped in
+ * a DTO, deliberately — PaymentTransferForm needs fundingSourceUrl to call
+ * createTransfer, so a "safe" DTO here would either break the transfer or hide
+ * the leak behind a reassuring name. The honest fix is to delete this endpoint
+ * once the server owns transfer orchestration.
  */
-export const getBank = async ({ documentId }: getBankProps) => {
+export const getBankForLegacyTransfer = async ({ documentId }: getBankProps) => {
   const actor = await requireActor();
 
   const bank = await getOwnedBankByDocumentId(actor, documentId);
@@ -276,6 +292,8 @@ export const getBank = async ({ documentId }: getBankProps) => {
 }
 
 /**
+ * LEGACY TRANSFER PATH — RETURNS ANOTHER USER'S PROVIDER CREDENTIALS.
+ *
  * PROTECTED — COUNTERPARTY LOOKUP, deliberately NOT ownership scoped.
  *
  * This resolves a transfer RECIPIENT, which by definition is a bank the actor
@@ -290,7 +308,7 @@ export const getBank = async ({ documentId }: getBankProps) => {
  *
  * Returns null on no match or an ambiguous match, preserving prior behaviour.
  */
-export const getBankByAccountId = async ({ accountId }: getBankByAccountIdProps) => {
+export const getCounterpartyBankForLegacyTransfer = async ({ accountId }: getBankByAccountIdProps) => {
   await requireActor();
 
   const bank = await findCounterpartyBankByAccountId(accountId);

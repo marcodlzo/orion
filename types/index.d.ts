@@ -138,13 +138,13 @@ declare type NewDwollaCustomerParams = {
 };
 
 declare interface CreditCardProps {
-  account: Account;
+  account: import("@/lib/dto/bank.dto").AccountSummaryDTO;
   userName: string;
   showBalance?: boolean;
 }
 
 declare interface BankInfoProps {
-  account: Account;
+  account: import("@/lib/dto/bank.dto").AccountSummaryDTO;
   appwriteItemId?: string;
   type: "full" | "card";
 }
@@ -157,7 +157,7 @@ declare interface HeaderBoxProps {
 }
 
 declare interface MobileNavProps {
-  user: User;
+  user: import("@/lib/dto/user.dto").CurrentUserDTO;
 }
 
 declare interface PageHeaderProps {
@@ -191,46 +191,50 @@ declare interface AuthFormProps {
 }
 
 declare interface BankDropdownProps {
-  accounts: Account[];
+  accounts: import("@/lib/dto/bank.dto").AccountSummaryDTO[];
   setValue?: UseFormSetValue<any>;
   otherStyles?: string;
 }
 
 declare interface BankTabItemProps {
-  account: Account;
+  account: import("@/lib/dto/bank.dto").AccountSummaryDTO;
   appwriteItemId?: string;
 }
 
 declare interface TotalBalanceBoxProps {
-  accounts: Account[];
+  accounts: import("@/lib/dto/bank.dto").AccountSummaryDTO[];
   totalBanks: number;
   totalCurrentBalance: number;
 }
 
 declare interface FooterProps {
-  user: User;
+  user: import("@/lib/dto/user.dto").CurrentUserDTO;
   type?: 'mobile' | 'desktop'
 }
 
 declare interface RightSidebarProps {
-  user: User;
-  transactions: Transaction[];
-  banks: Bank[] & Account[];
+  user: import("@/lib/dto/user.dto").CurrentUserDTO;
+  transactions: import("@/lib/dto/transaction.dto").TransactionDTO[];
+  /**
+   * Account summaries only. Was `Bank[] & Account[]`, which typed the raw bank
+   * document — accessToken and fundingSourceUrl included — as a client prop.
+   */
+  banks: import("@/lib/dto/bank.dto").AccountSummaryDTO[];
 }
 
 declare interface SiderbarProps {
-  user: User;
+  user: import("@/lib/dto/user.dto").CurrentUserDTO;
 }
 
 declare interface RecentTransactionsProps {
-  accounts: Account[];
-  transactions: Transaction[];
+  accounts: import("@/lib/dto/bank.dto").AccountSummaryDTO[];
+  transactions: import("@/lib/dto/transaction.dto").TransactionDTO[];
   appwriteItemId: string;
   page: number;
 }
 
 declare interface TransactionHistoryTableProps {
-  transactions: Transaction[];
+  transactions: import("@/lib/dto/transaction.dto").TransactionDTO[];
   page: number;
 }
 
@@ -239,7 +243,7 @@ declare interface CategoryBadgeProps {
 }
 
 declare interface TransactionTableProps {
-  transactions: Transaction[];
+  transactions: import("@/lib/dto/transaction.dto").TransactionDTO[];
 }
 
 declare interface CategoryProps {
@@ -247,11 +251,11 @@ declare interface CategoryProps {
 }
 
 declare interface DoughnutChartProps {
-  accounts: Account[];
+  accounts: import("@/lib/dto/bank.dto").AccountSummaryDTO[];
 }
 
 declare interface PaymentTransferFormProps {
-  accounts: Account[];
+  accounts: import("@/lib/dto/bank.dto").AccountSummaryDTO[];
 }
 
 // Actions

@@ -85,8 +85,8 @@ const ALLOWED_SERVER_ACTIONS = [
   "createTransfer",          // PaymentTransferForm
   "createLinkToken",         // PlaidLink
   "exchangePublicToken",     // PlaidLink
-  "getBank",                 // PaymentTransferForm
-  "getBankByAccountId",      // PaymentTransferForm
+  "getBankForLegacyTransfer",              // PaymentTransferForm — leaks credentials
+  "getCounterpartyBankForLegacyTransfer",  // PaymentTransferForm — leaks credentials
   "getLoggedInUser",         // AuthForm
   "logoutAccount",           // Footer
   "signIn",                  // AuthForm
@@ -107,8 +107,8 @@ const PROTECTED_ACTIONS = [
   "createTransaction",
   "createTransfer",
   "exchangePublicToken",
-  "getBank",
-  "getBankByAccountId",
+  "getBankForLegacyTransfer",
+  "getCounterpartyBankForLegacyTransfer",
   "getLoggedInUser",
   "logoutAccount",
 ];

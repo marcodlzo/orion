@@ -97,8 +97,8 @@ vi.mock("../repositories/banks.repository", () => ({
 import {
   createLinkToken,
   exchangePublicToken,
-  getBank,
-  getBankByAccountId,
+  getBankForLegacyTransfer,
+  getCounterpartyBankForLegacyTransfer,
   getLoggedInUser,
   logoutAccount,
 } from "./user.actions";
@@ -137,12 +137,12 @@ const noPrivilegedWorkHappened = () => {
 
 describe("anonymous callers reach no privileged collaborator", () => {
   it("getBank", async () => {
-    await expect(getBank({ documentId: "bank-doc-bob" })).rejects.toThrow();
+    await expect(getBankForLegacyTransfer({ documentId: "bank-doc-bob" })).rejects.toThrow();
     noPrivilegedWorkHappened();
   });
 
   it("getBankByAccountId", async () => {
-    await expect(getBankByAccountId({ accountId: "plaid-account-bob" })).rejects.toThrow();
+    await expect(getCounterpartyBankForLegacyTransfer({ accountId: "plaid-account-bob" })).rejects.toThrow();
     noPrivilegedWorkHappened();
   });
 

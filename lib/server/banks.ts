@@ -16,6 +16,11 @@ import {
 } from "../repositories/banks.repository";
 import { NotFoundError } from "../repositories/errors";
 import { getTransactionsForOwnedBank } from "../repositories/transactions.repository";
+import { toAccountSummaryDTO } from "../dto/bank.dto";
+import {
+  toTransactionDTOFromPlaid,
+  toTransactionDTOFromRecord,
+} from "../dto/transaction.dto";
 
 /**
  * OWNED — every account belonging to the authenticated actor.
@@ -38,26 +43,9 @@ export const getAccounts = async () => {
         });
         const accountData = accountsResponse.data.accounts[0];
 
-        // get institution info from plaid
-        const institution = await getInstitution({
-          institutionId: accountsResponse.data.item.institution_id!,
-        });
-
-        const account = {
-          id: accountData.account_id,
-          availableBalance: accountData.balances.available!,
-          currentBalance: accountData.balances.current!,
-          institutionId: institution.institution_id,
-          name: accountData.name,
-          officialName: accountData.official_name,
-          mask: accountData.mask!,
-          type: accountData.type as string,
-          subtype: accountData.subtype! as string,
-          appwriteItemId: bank.$id,
-          shareableId: bank.shareableId,
-        };
-
-        return account;
+        // The bank record holds accessToken and fundingSourceUrl. It is passed
+        // to the mapper rather than spread, so neither can ride along.
+        return toAccountSummaryDTO({ plaidAccount: accountData, bank });
       })
     );
 
@@ -101,38 +89,18 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
     );
 
     const transferTransactions = transferTransactionsData.documents.map(
-      (transferData) => ({
-        id: transferData.$id,
-        name: transferData.name!,
-        amount: transferData.amount!,
-        date: transferData.$createdAt,
-        paymentChannel: transferData.channel,
-        category: transferData.category,
-        type: transferData.senderBankId === bank.$id ? "debit" : "credit",
-      })
+      (transferData) =>
+        toTransactionDTOFromRecord(
+          transferData,
+          transferData.senderBankId === bank.$id ? "debit" : "credit"
+        )
     );
 
-    // get institution info from plaid
-    const institution = await getInstitution({
-      institutionId: accountsResponse.data.item.institution_id!,
-    });
-
     const transactions = await getTransactions({
-      accessToken: bank?.accessToken,
+      accessToken: bank.accessToken,
     });
 
-    const account = {
-      id: accountData.account_id,
-      availableBalance: accountData.balances.available!,
-      currentBalance: accountData.balances.current!,
-      institutionId: institution.institution_id,
-      name: accountData.name,
-      officialName: accountData.official_name,
-      mask: accountData.mask!,
-      type: accountData.type as string,
-      subtype: accountData.subtype! as string,
-      appwriteItemId: bank.$id,
-    };
+    const account = toAccountSummaryDTO({ plaidAccount: accountData, bank });
 
     // sort transactions by date such that the most recent transaction is first
       const allTransactions = [...transactions, ...transferTransactions].sort(
@@ -145,24 +113,6 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
     });
   } catch (error) {
     console.error("An error occurred while getting the account:", error);
-  }
-};
-
-// Get bank info
-export const getInstitution = async ({
-  institutionId,
-}: getInstitutionProps) => {
-  try {
-    const institutionResponse = await plaidClient.institutionsGetById({
-      institution_id: institutionId,
-      country_codes: ["US"] as CountryCode[],
-    });
-
-    const intitution = institutionResponse.data.institution;
-
-    return parseStringify(intitution);
-  } catch (error) {
-    console.error("An error occurred while getting the accounts:", error);
   }
 };
 
@@ -182,18 +132,9 @@ export const getTransactions = async ({
 
       const data = response.data;
 
-      transactions = response.data.added.map((transaction) => ({
-        id: transaction.transaction_id,
-        name: transaction.name,
-        paymentChannel: transaction.payment_channel,
-        type: transaction.payment_channel,
-        accountId: transaction.account_id,
-        amount: transaction.amount,
-        pending: transaction.pending,
-        category: transaction.category ? transaction.category[0] : "",
-        date: transaction.date,
-        image: transaction.logo_url,
-      }));
+      // Mapped to the display DTO. The sync loop's defects (no cursor, results
+      // overwritten each page) are deliberately untouched by this phase.
+      transactions = response.data.added.map(toTransactionDTOFromPlaid);
 
       hasMore = data.has_more;
     }
