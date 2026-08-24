@@ -81,13 +81,10 @@ function findActionModules(): ActionModule[] {
  * browser/server boundary, move it into lib/server/ instead.
  */
 const ALLOWED_SERVER_ACTIONS = [
-  "createTransaction",       // PaymentTransferForm
-  "createTransfer",          // PaymentTransferForm
   "createLinkToken",         // PlaidLink
   "exchangePublicToken",     // PlaidLink
-  "getBankForLegacyTransfer",              // PaymentTransferForm — leaks credentials
-  "getCounterpartyBankForLegacyTransfer",  // PaymentTransferForm — leaks credentials
   "getLoggedInUser",         // AuthForm
+  "initiateTransfer",        // PaymentTransferForm — the ONLY money movement
   "logoutAccount",           // Footer
   "signIn",                  // AuthForm
   "signUp",                  // AuthForm
@@ -104,17 +101,23 @@ const ALLOWED_SERVER_ACTIONS = [
  */
 const PROTECTED_ACTIONS = [
   "createLinkToken",
-  "createTransaction",
-  "createTransfer",
   "exchangePublicToken",
-  "getBankForLegacyTransfer",
-  "getCounterpartyBankForLegacyTransfer",
   "getLoggedInUser",
+  "initiateTransfer",
   "logoutAccount",
 ];
 
 const MUST_STAY_INTERNAL = [
   "addFundingSource",
+  "createDwollaTransfer",
+  "createTransaction",
+  "createTransactionRecord",
+  "createTransfer",
+  "executeTransfer",
+  "findCounterpartyBankByAccountId",
+  "getBankForLegacyTransfer",
+  "getCounterpartyBankForLegacyTransfer",
+  "getOwnedBankByDocumentId",
   "createAdminClient",
   "createBankAccount",
   "createDwollaCustomer",
@@ -320,6 +323,142 @@ describe("admin client boundary", () => {
   });
 });
 
+/**
+ * THE CLIENT BOUNDARY FOR PROVIDER CAPABILITIES.
+ *
+ * A funding-source URL is a capability: possession of one is sufficient to move
+ * money from that account. It must not appear in any module that ships to the
+ * browser, and no client component may reach the internals that handle one.
+ */
+describe("provider capabilities never reach client source", () => {
+  /**
+   * Modules that actually reach the client bundle.
+   *
+   * Directory is NOT the test: app/(root)/page.tsx is a server component and
+   * legitimately imports server-only modules. A module is client-reachable if
+   * it declares "use client" or is imported by one that does.
+   *
+   * The traversal stops at "use server": a client component importing an action
+   * receives a reference, not the module body, so an action's dependencies do
+   * not ship to the browser.
+   */
+  const clientModules = (() => {
+    const files: string[] = [];
+    for (const dir of SEARCH) {
+      try {
+        walk(join(ROOT, dir), files);
+      } catch {
+        /* directory may not exist */
+      }
+    }
+
+    type Mod = { file: string; code: string; isClient: boolean; isAction: boolean; imports: string[] };
+    const mods = new Map<string, Mod>();
+
+    for (const full of files) {
+      const rel = full.slice(ROOT.length).replace(/\\/g, "/");
+      if (/\.test\.tsx?$/.test(rel)) continue;
+      const raw = readFileSync(full, "utf8");
+      const code = raw
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+      const imports: string[] = [];
+      for (const spec of matchAllGroups(code, /from\s+["']([^"']+)["']/g)) {
+        let base: string;
+        if (spec.startsWith("@/")) base = join(ROOT, spec.slice(2));
+        else if (spec.startsWith(".")) base = join(ROOT, rel, "..", spec);
+        else continue;
+        for (const cand of [base + ".ts", base + ".tsx", join(base, "index.ts")]) {
+          try {
+            statSync(cand);
+            imports.push(cand.slice(ROOT.length).replace(/\\/g, "/"));
+            break;
+          } catch {
+            /* not this extension */
+          }
+        }
+      }
+
+      mods.set(rel, {
+        file: rel,
+        code,
+        isClient: /^\s*["']use client["']/m.test(raw),
+        isAction: /^\s*["']use server["']/m.test(raw),
+        imports,
+      });
+    }
+
+    const reachable = new Set<string>();
+    const queue = Array.from(mods.values()).filter((m) => m.isClient).map((m) => m.file);
+    while (queue.length) {
+      const cur = queue.pop()!;
+      if (reachable.has(cur)) continue;
+      reachable.add(cur);
+      for (const dep of mods.get(cur)?.imports ?? []) {
+        if (reachable.has(dep)) continue;
+        if (mods.get(dep)?.isAction) continue; // boundary stops here
+        queue.push(dep);
+      }
+    }
+
+    return Array.from(reachable).map((f) => mods.get(f)!).filter(Boolean);
+  })();
+
+  it("finds the client module set", () => {
+    expect(clientModules.length).toBeGreaterThan(0);
+    expect(clientModules.map((m) => m.file)).toContain(
+      "components/PaymentTransferForm.tsx"
+    );
+  });
+
+  it("no component or route mentions fundingSourceUrl", () => {
+    const offenders = clientModules
+      .filter(({ code }) => /\bfundingSourceUrl\b/.test(code))
+      .map(({ file }) => file);
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("no component or route mentions a Plaid or Dwolla credential field", () => {
+    const offenders = clientModules
+      .filter(({ code }) => /\b(accessToken|processorToken|dwollaCustomerId|dwollaCustomerUrl)\b/.test(code))
+      .map(({ file }) => file);
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("no client component imports a repository, service or provider module", () => {
+    const offenders = clientModules
+      .filter(({ code }) =>
+        /from\s+["'][^"']*(repositories\/|services\/|server\/dwolla|server\/banks|lib\/appwrite|lib\/plaid)/.test(code)
+      )
+      .map(({ file }) => file);
+
+    expect(offenders).toEqual([]);
+  });
+
+  it("PaymentTransferForm imports exactly one money-movement action", () => {
+    const form = clientModules.find(({ file }) =>
+      file.endsWith("components/PaymentTransferForm.tsx")
+    );
+    expect(form, "PaymentTransferForm not found").toBeDefined();
+
+    const code = form!.code;
+    expect(code).toMatch(/import\s+\{\s*initiateTransfer\s*\}\s+from/);
+
+    // The four primitives it used to orchestrate with must be gone.
+    for (const removed of [
+      "createTransfer",
+      "createTransaction",
+      "getBankForLegacyTransfer",
+      "getCounterpartyBankForLegacyTransfer",
+    ]) {
+      expect(code, `${removed} must not be reachable from the browser`).not.toContain(removed);
+    }
+  });
+});
+
 describe("server-only boundaries", () => {
   const mustBeServerOnly = [
     "lib/appwrite.ts",
@@ -327,6 +466,7 @@ describe("server-only boundaries", () => {
     "lib/plaid.ts",
     "lib/server/banks.ts",
     "lib/server/dwolla.ts",
+    "lib/services/transfers.service.ts",
     "lib/repositories/accounts.repository.ts",
     "lib/repositories/banks.repository.ts",
     "lib/repositories/transactions.repository.ts",

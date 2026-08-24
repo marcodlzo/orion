@@ -97,13 +97,9 @@ vi.mock("../repositories/banks.repository", () => ({
 import {
   createLinkToken,
   exchangePublicToken,
-  getBankForLegacyTransfer,
-  getCounterpartyBankForLegacyTransfer,
   getLoggedInUser,
   logoutAccount,
 } from "./user.actions";
-import { createTransaction } from "./transaction.actions";
-import { createTransfer } from "./dwolla.actions";
 import { InfrastructureError } from "../auth/errors";
 
 const ALICE = {
@@ -136,16 +132,6 @@ const noPrivilegedWorkHappened = () => {
 };
 
 describe("anonymous callers reach no privileged collaborator", () => {
-  it("getBank", async () => {
-    await expect(getBankForLegacyTransfer({ documentId: "bank-doc-bob" })).rejects.toThrow();
-    noPrivilegedWorkHappened();
-  });
-
-  it("getBankByAccountId", async () => {
-    await expect(getCounterpartyBankForLegacyTransfer({ accountId: "plaid-account-bob" })).rejects.toThrow();
-    noPrivilegedWorkHappened();
-  });
-
   it("createLinkToken", async () => {
     await createLinkToken();
     noPrivilegedWorkHappened();
@@ -153,28 +139,6 @@ describe("anonymous callers reach no privileged collaborator", () => {
 
   it("exchangePublicToken", async () => {
     await exchangePublicToken({ publicToken: "public-sandbox-token" });
-    noPrivilegedWorkHappened();
-  });
-
-  it("createTransaction", async () => {
-    await expect(createTransaction({
-      name: "fabricated",
-      amount: "100.00",
-      senderId: "user-doc-bob",
-      senderBankId: "bank-doc-bob",
-      receiverId: "user-doc-mallory",
-      receiverBankId: "bank-doc-mallory",
-      email: "mallory@example.com",
-    })).rejects.toThrow();
-    noPrivilegedWorkHappened();
-  });
-
-  it("createTransfer — money movement must never be anonymous", async () => {
-    await createTransfer({
-      sourceFundingSourceUrl: "https://api-sandbox.dwolla.com/funding-sources/victim",
-      destinationFundingSourceUrl: "https://api-sandbox.dwolla.com/funding-sources/attacker",
-      amount: "500.00",
-    });
     noPrivilegedWorkHappened();
   });
 

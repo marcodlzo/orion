@@ -13,12 +13,9 @@
 // getLoggedInUser return an allowlisted CurrentUserDTO, and SSN and date of
 // birth are no longer persisted at all.
 //
-// NOT yet fixed here — the two functions suffixed ForLegacyTransfer below
-// still return raw bank documents including provider credentials, because
-// PaymentTransferForm orchestrates the transfer in the browser and needs a
-// funding-source URL to do it. They are named for what they are rather than
-// wrapped in a DTO that would look safe while leaking the same capability.
-// Deleting them is the transfer-orchestration phase.
+// The two ForLegacyTransfer functions that used to live here are gone. Money
+// movement is one action, lib/actions/transfer.actions.ts, and the browser no
+// longer receives a funding-source URL or an access token by any path.
 
 import { cookies } from "next/headers";
 import { revalidatePath } from "next/cache";
@@ -43,12 +40,7 @@ import {
   createUserRecord,
   findUserByAuthId,
 } from "../repositories/users.repository";
-import {
-  createBankForActor,
-  findCounterpartyBankByAccountId,
-  getOwnedBankByDocumentId,
-} from "../repositories/banks.repository";
-import { NotFoundError } from "../repositories/errors";
+import { createBankForActor } from "../repositories/banks.repository";
 import { toCurrentUserDTO } from "../dto/user.dto";
 
 /** PUBLIC AUTH ENTRY — requiring a session to sign in would be circular. */
@@ -262,57 +254,4 @@ export const exchangePublicToken = async ({
   }
 }
 
-/**
- * LEGACY TRANSFER PATH — RETURNS PROVIDER CREDENTIALS TO THE BROWSER.
- *
- * PROTECTED AND OWNERSHIP SCOPED.
- *
- * The query filters on document id AND owner together, so another user's bank
- * is never loaded. A record that does not exist and one that exists but is not
- * owned both raise NotFoundError, so this cannot be used to test whether a bank
- * id is real.
- *
- * Errors are no longer swallowed: a datastore outage surfaces as
- * InfrastructureError rather than as an indistinguishable undefined.
- *
- * DEFECT: the response is the raw document, so the actor's own Plaid access
- * token and Dwolla funding-source URL reach the browser. This is NOT wrapped in
- * a DTO, deliberately — PaymentTransferForm needs fundingSourceUrl to call
- * createTransfer, so a "safe" DTO here would either break the transfer or hide
- * the leak behind a reassuring name. The honest fix is to delete this endpoint
- * once the server owns transfer orchestration.
- */
-export const getBankForLegacyTransfer = async ({ documentId }: getBankProps) => {
-  const actor = await requireActor();
 
-  const bank = await getOwnedBankByDocumentId(actor, documentId);
-  if (!bank) throw new NotFoundError("Bank not found");
-
-  return parseStringify(bank);
-}
-
-/**
- * LEGACY TRANSFER PATH — RETURNS ANOTHER USER'S PROVIDER CREDENTIALS.
- *
- * PROTECTED — COUNTERPARTY LOOKUP, deliberately NOT ownership scoped.
- *
- * This resolves a transfer RECIPIENT, which by definition is a bank the actor
- * does not own. Scoping it by ownership would break paying anybody.
- *
- * STILL VULNERABLE, and not fixable within this phase:
- *  - it returns the recipient's full record, including their Plaid access token
- *    and Dwolla funding-source URL. Narrowing the response is the DTO phase.
- *  - the caller supplies accountId, decoded from a "shareable id" that is only
- *    base64. Removing the browser's need to resolve a recipient at all is the
- *    transfer-orchestration phase.
- *
- * Returns null on no match or an ambiguous match, preserving prior behaviour.
- */
-export const getCounterpartyBankForLegacyTransfer = async ({ accountId }: getBankByAccountIdProps) => {
-  await requireActor();
-
-  const bank = await findCounterpartyBankByAccountId(accountId);
-  if (!bank) return null;
-
-  return parseStringify(bank);
-}

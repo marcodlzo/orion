@@ -85,15 +85,17 @@ jobs:
       # Dwolla customer identifiers are now absent from client output entirely;
       # this locks that in.
       #
-      # fundingSourceUrl is deliberately NOT checked here: PaymentTransferForm
-      # still receives one because the browser orchestrates the transfer. That
-      # is a known, tracked defect and the check is added once the server owns
-      # transfer orchestration.
+      # fundingSourceUrl is now included: the server owns transfer orchestration
+      # and the browser never receives a funding-source URL. Possession of one
+      # is sufficient to move money from that account, so this must stay at zero.
+      #
+      # Only CLIENT output is scanned. Server bundles legitimately contain these
+      # names — that is where the work happens.
       - name: Assert provider credentials are absent from client output
         run: |
           set -euo pipefail
           fail=0
-          for name in accessToken processorToken dwollaCustomerId dwollaCustomerUrl; do
+          for name in accessToken processorToken fundingSourceUrl dwollaCustomerId dwollaCustomerUrl; do
             if grep -rIlF -- "$name" .next/static 2>/dev/null; then
               echo "::error::'$name' found in client build output"
               fail=1

@@ -36,6 +36,48 @@ export const dwollaClient = new Client({
   secret: process.env.DWOLLA_SECRET as string,
 });
 
+/**
+ * Initiate a Dwolla transfer.
+ *
+ * Accepts funding-source URLs because it is server-only and not remotely
+ * callable. This function was previously a `'use server'` action, which meant
+ * anyone who could reach the app could name any two funding sources and move
+ * money between them. It is now reachable only from the transfer service.
+ *
+ * Returns the provider reference. Dwolla answers a successful POST with 201 and
+ * a Location header naming the created transfer.
+ *
+ * ACCEPTANCE IS NOT SETTLEMENT. A returned URL means Dwolla accepted the
+ * request, not that money moved. ACH settles over days and can still fail or be
+ * returned. Nothing here may be treated as a terminal state.
+ *
+ * No idempotency key is sent. Retrying this creates a second transfer. That is
+ * a tracked defect for the idempotency milestone and is NOT solved by moving
+ * the call server-side.
+ */
+export async function createDwollaTransfer(input: {
+  sourceFundingSourceUrl: string;
+  destinationFundingSourceUrl: string;
+  amount: string;
+}): Promise<{ transferUrl: string | null; transferId: string | null }> {
+  const requestBody = {
+    _links: {
+      source: { href: input.sourceFundingSourceUrl },
+      destination: { href: input.destinationFundingSourceUrl },
+    },
+    amount: {
+      currency: "USD",
+      value: input.amount,
+    },
+  };
+
+  const response = await dwollaClient.post("transfers", requestBody);
+  const transferUrl = response.headers.get("location") ?? null;
+  const transferId = transferUrl ? transferUrl.split("/").pop() ?? null : null;
+
+  return { transferUrl, transferId };
+}
+
 // Create a Dwolla Funding Source using a Plaid Processor Token
 export const createFundingSource = async (
   options: CreateFundingSourceOptions

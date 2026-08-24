@@ -76,7 +76,8 @@ vi.mock("../server/dwolla", () => ({
   addFundingSource: vi.fn(),
 }));
 
-import { signUp, getBankForLegacyTransfer } from "./user.actions";
+import * as userActions from "./user.actions";
+import { signUp } from "./user.actions";
 
 const SSN = "REDACTED-SSN";
 const DOB = "REDACTED-DOB";
@@ -172,50 +173,32 @@ describe("signup — SSN and date of birth are request scoped", () => {
 });
 
 /**
- * PRESERVED EVIDENCE — do not delete when the transfer path is rewritten.
+ * The legacy transfer path is GONE.
  *
- * Ordinary read paths are now safe. This one is not, and pretending otherwise
- * by wrapping it in a DTO would hide the capability while still shipping it.
+ * Phase 4A could only rename these honestly, because PaymentTransferForm needed
+ * a funding-source URL to orchestrate the transfer in the browser. The server
+ * now owns orchestration, so the actions that handed out provider credentials
+ * no longer exist as endpoints at all.
  */
-describe("legacy transfer path — STILL LEAKS PROVIDER CREDENTIALS", () => {
-  const BANK = {
-    $id: "bank-doc-alice",
-    userId: { $id: "user-doc-alice" },
-    accountId: "plaid-account-alice",
-    bankId: "plaid-item-alice",
-    accessToken: "REDACTED-PLAID-ACCESS-TOKEN",
-    fundingSourceUrl: "https://api-sandbox.dwolla.invalid/funding-sources/REDACTED",
-    shareableId: "cGxhaWQtYWNjb3VudC1hbGljZQ==",
-  };
-
-  beforeEach(() => {
-    cookieGet.mockReturnValue({ value: "session-for-alice" });
-    accountGet.mockResolvedValue({ $id: "auth-alice" });
-    findUserByAuthId.mockResolvedValue({
-      $id: "user-doc-alice",
-      userId: "auth-alice",
-      dwollaCustomerId: "dwolla-alice",
-    });
-    listDocuments.mockResolvedValue({ documents: [BANK], total: 1 });
+describe("legacy credential-leaking actions are removed", () => {
+  it("no longer exports getBankForLegacyTransfer", () => {
+    expect(userActions).not.toHaveProperty("getBankForLegacyTransfer");
   });
 
-  it("DEFECT: returns the Plaid access token to the browser", async () => {
-    const bank = await getBankForLegacyTransfer({ documentId: "bank-doc-alice" });
-
-    expect(bank.accessToken).toBe("REDACTED-PLAID-ACCESS-TOKEN");
-    // AFTER (orchestration phase): this action does not exist. The server
-    // resolves funding sources itself and the browser sends only an intent.
+  it("no longer exports getCounterpartyBankForLegacyTransfer", () => {
+    expect(userActions).not.toHaveProperty("getCounterpartyBankForLegacyTransfer");
   });
 
-  it("DEFECT: returns the Dwolla funding-source URL, which is a capability", async () => {
-    const bank = await getBankForLegacyTransfer({ documentId: "bank-doc-alice" });
-
-    // Possession of this URL is sufficient for createTransfer to move money
-    // from the account. No DTO can fix that while the browser must supply it.
-    expect(bank.fundingSourceUrl).toContain("funding-sources");
-  });
-
-  it("is named so nobody mistakes it for a safe read path", () => {
-    expect(getBankForLegacyTransfer.name).toContain("LegacyTransfer");
+  it("exposes no action that returns a bank record", () => {
+    // Every remaining export is auth, profile or bank-linking. None hands the
+    // caller a record carrying accessToken or fundingSourceUrl.
+    expect(Object.keys(userActions).sort()).toEqual([
+      "createLinkToken",
+      "exchangePublicToken",
+      "getLoggedInUser",
+      "logoutAccount",
+      "signIn",
+      "signUp",
+    ]);
   });
 });

@@ -60,11 +60,7 @@ vi.mock("../server/dwolla", () => ({
   createDwollaCustomer: vi.fn(),
 }));
 
-import {
-  getBankForLegacyTransfer,
-  getCounterpartyBankForLegacyTransfer,
-  getLoggedInUser,
-} from "./user.actions";
+import { getLoggedInUser } from "./user.actions";
 import { getOwnedBanks } from "../repositories/banks.repository";
 import { requireActor } from "../auth/actor";
 
@@ -167,72 +163,6 @@ beforeEach(() => {
   authenticateAlice();
 });
 
-describe("A. getBank — cross-owner access is denied", () => {
-  it("FIXED: Alice reading Bob's bank id raises NotFound", async () => {
-    // BEFORE: returned Bob's full document including his Plaid access token.
-    await expect(getBankForLegacyTransfer({ documentId: "bank-doc-bob" })).rejects.toBeInstanceOf(
-      NotFoundError
-    );
-  });
-
-  it("Alice can still read her own bank", async () => {
-    const bank = await getBankForLegacyTransfer({ documentId: "bank-doc-alice" });
-
-    expect(bank.$id).toBe("bank-doc-alice");
-  });
-
-  it("a missing bank and an unowned bank are indistinguishable", async () => {
-    const unowned = await getBankForLegacyTransfer({ documentId: "bank-doc-bob" }).catch((e: unknown) => e);
-    const missing = await getBankForLegacyTransfer({ documentId: "does-not-exist" }).catch((e: unknown) => e);
-
-    // Returning "forbidden" for an unowned record would confirm the id is real
-    // and turn this action into an enumeration oracle.
-    expect(unowned).toBeInstanceOf(NotFoundError);
-    expect(missing).toBeInstanceOf(NotFoundError);
-    expect(unowned.message).toBe(missing.message);
-  });
-
-  it("scopes ownership inside the datastore query, not after fetching", async () => {
-    await getBankForLegacyTransfer({ documentId: "bank-doc-alice" });
-
-    const bankCall = listDocuments.mock.calls.find(
-      (c: unknown[]) => c[1] === BANK_COLLECTION
-    );
-    expect(filterValue(bankCall?.[2], "$id")).toBe("bank-doc-alice");
-    expect(filterValue(bankCall?.[2], "userId")).toBe("user-doc-alice");
-  });
-});
-
-describe("D. ownership compares the correct identifier", () => {
-  it("REGRESSION: filters on USER.$id, never the auth account id", async () => {
-    await getBankForLegacyTransfer({ documentId: "bank-doc-alice" });
-
-    const bankCall = listDocuments.mock.calls.find(
-      (c: unknown[]) => c[1] === BANK_COLLECTION
-    );
-
-    // BANK.userId is a relationship to USER.$id. The user document ALSO has a
-    // field named `userId` holding the auth account id. Comparing against
-    // actor.authId would not error — it would silently match nothing, reading
-    // as "this user has no banks" rather than as a bug.
-    expect(filterValue(bankCall?.[2], "userId")).toBe("user-doc-alice");
-    expect(filterValue(bankCall?.[2], "userId")).not.toBe("auth-alice");
-  });
-
-  it("getOwnedBanks scopes on USER.$id too", async () => {
-    const actor = await requireActor();
-    listDocuments.mockClear();
-
-    await getOwnedBanks(actor);
-
-    const call = listDocuments.mock.calls.find(
-      (c: unknown[]) => c[1] === BANK_COLLECTION
-    );
-    expect(filterValue(call?.[2], "userId")).toBe("user-doc-alice");
-    expect(filterValue(call?.[2], "userId")).not.toBe("auth-alice");
-  });
-});
-
 describe("B. bank lists are actor scoped", () => {
   it("getOwnedBanks returns only the actor's banks", async () => {
     const actor = await requireActor();
@@ -246,64 +176,6 @@ describe("B. bank lists are actor scoped", () => {
     // BEFORE: getBanks({ userId }) accepted any user id.
     // AFTER: the only argument is the actor itself.
     expect(getOwnedBanks.length).toBe(1);
-  });
-});
-
-describe("E. datastore failure is not reported as NotFound", () => {
-  it("raises InfrastructureError", async () => {
-    listDocuments.mockImplementation(async (_db: string, collectionId: string) => {
-      if (collectionId === USER_COLLECTION) {
-        return { documents: [ALICE_USER_DOC], total: 1 };
-      }
-      throw new Error("appwrite is down");
-    });
-
-    const error = await getBankForLegacyTransfer({ documentId: "bank-doc-alice" }).catch((e: unknown) => e);
-
-    expect(error).toBeInstanceOf(InfrastructureError);
-    expect(error).not.toBeInstanceOf(NotFoundError);
-    // BEFORE: swallowed into console.log and resolved undefined.
-  });
-});
-
-describe("F. unauthenticated callers fail before the repository runs", () => {
-  it("getBank rejects and issues no query", async () => {
-    cookieGet.mockReturnValue(undefined);
-
-    await expect(getBankForLegacyTransfer({ documentId: "bank-doc-alice" })).rejects.toBeInstanceOf(
-      UnauthorizedError
-    );
-    expect(listDocuments).not.toHaveBeenCalled();
-  });
-});
-
-describe("counterparty lookup — deliberately not ownership scoped", () => {
-  it("resolves a bank the actor does NOT own, by design", async () => {
-    // Paying somebody requires reading their bank. Scoping this by ownership
-    // would break transfers entirely.
-    const bank = await getCounterpartyBankForLegacyTransfer({ accountId: "plaid-account-bob" });
-
-    expect(bank.$id).toBe("bank-doc-bob");
-  });
-
-  it("DEFECT: still returns the counterparty's provider credentials", async () => {
-    const bank = await getCounterpartyBankForLegacyTransfer({ accountId: "plaid-account-bob" });
-
-    // Access control cannot fix this — the recipient genuinely must be
-    // readable. Narrowing the response is the DTO phase; removing the
-    // browser's need to resolve a recipient is the orchestration phase.
-    expect(bank.accessToken).toBe("access-sandbox-bob-secret-token");
-    expect(bank.fundingSourceUrl).toContain("funding-bob");
-    // AFTER (DTO phase): only addressing data, never credentials.
-  });
-
-  it("is still authenticated", async () => {
-    cookieGet.mockReturnValue(undefined);
-
-    await expect(
-      getCounterpartyBankForLegacyTransfer({ accountId: "plaid-account-bob" })
-    ).rejects.toBeInstanceOf(UnauthorizedError);
-    expect(listDocuments).not.toHaveBeenCalled();
   });
 });
 
