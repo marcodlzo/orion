@@ -26,7 +26,15 @@ import { Textarea } from "./ui/textarea";
 const formSchema = z.object({
   email: z.string().email("Invalid email address"),
   name: z.string().min(4, "Transfer note is too short"),
-  amount: z.string().min(4, "Amount is too short"),
+  // Was `.min(4)`, which validated the STRING LENGTH — it rejected "10" while
+  // accepting "abcd". This mirrors the server's accepted money form so the user
+  // gets sensible feedback. It is feedback only: the server reparses every
+  // amount and is the actual boundary.
+  amount: z
+    .string()
+    .regex(/^\d+(\.\d{1,2})?$/, "Enter an amount such as 10 or 10.50")
+    // "greater than zero" without arithmetic: any non-zero digit anywhere.
+    .refine((v) => /[1-9]/.test(v), "Amount must be greater than zero"),
   senderBank: z.string().min(4, "Please select a valid bank account"),
   shareableId: z.string().min(8, "Please select a valid shareable Id"),
 });

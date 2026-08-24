@@ -3,16 +3,17 @@
 // from a client component — they are used internally by the signup and
 // bank-linking flows — so none is a server action.
 //
-// createTransfer deliberately stays in lib/actions/dwolla.actions.ts: it IS
-// invoked from the browser today. Securing it means removing that ability
-// entirely, which is transfer-orchestration work for a later milestone, not
-// something to change here.
+// createDwollaTransfer lives here rather than behind a "use server" action:
+// it accepts funding-source URLs, and a remotely callable function that does
+// that is an account-drain primitive.
 //
-// Moved verbatim. Behaviour is unchanged, including the absent idempotency
-// keys and the discarded transfer reference, both catalogued as defects.
+// Still absent, both tracked: idempotency keys, and persistence of the returned
+// transfer reference.
 import "server-only";
 
 import { Client } from "dwolla-v2";
+
+import { toDecimalString, type Money } from "../domain/money";
 
 const getEnvironment = (): "production" | "sandbox" => {
   const environment = process.env.DWOLLA_ENV as string;
@@ -37,6 +38,24 @@ export const dwollaClient = new Client({
 });
 
 /**
+ * Dwolla's wire representation of an amount.
+ *
+ * The ADAPTER decides this, not application logic. Dwolla wants a decimal
+ * string with the currency alongside it; the domain holds exact minor units and
+ * knows nothing about that.
+ *
+ * Uses the domain's exact formatter, so the value is never reconstructed by
+ * dividing by 100 in floating point.
+ *
+ *   125075 -> "1250.75"
+ *        1 -> "0.01"
+ *      100 -> "1.00"
+ */
+export function toProviderAmount(money: Money): string {
+  return toDecimalString(money);
+}
+
+/**
  * Initiate a Dwolla transfer.
  *
  * Accepts funding-source URLs because it is server-only and not remotely
@@ -58,7 +77,8 @@ export const dwollaClient = new Client({
 export async function createDwollaTransfer(input: {
   sourceFundingSourceUrl: string;
   destinationFundingSourceUrl: string;
-  amount: string;
+  /** Exact minor units. Serialised to Dwolla's format by this adapter. */
+  amount: Money;
 }): Promise<{ transferUrl: string | null; transferId: string | null }> {
   const requestBody = {
     _links: {
@@ -66,8 +86,8 @@ export async function createDwollaTransfer(input: {
       destination: { href: input.destinationFundingSourceUrl },
     },
     amount: {
-      currency: "USD",
-      value: input.amount,
+      currency: input.amount.currency,
+      value: toProviderAmount(input.amount),
     },
   };
 

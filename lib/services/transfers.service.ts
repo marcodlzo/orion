@@ -19,7 +19,11 @@ import {
   getOwnedBankByDocumentId,
 } from "../repositories/banks.repository";
 import { NotFoundError } from "../repositories/errors";
-import { createTransactionRecord } from "../repositories/transactions.repository";
+import {
+  createTransactionRecord,
+  toLegacyTransactionAmount,
+} from "../repositories/transactions.repository";
+import { isPositive, tryParseUsd, type Money } from "../domain/money";
 import type { TransferResultDTO } from "../dto/transfer.dto";
 
 /**
@@ -29,20 +33,43 @@ import type { TransferResultDTO } from "../dto/transfer.dto";
  * boundary — a caller can post whatever they like directly to the action.
  * This runs on the server, on every call.
  *
- * Amount stays a string here. Integer minor units are the money-primitives
- * milestone; this only rejects values that are plainly not money.
+ * The amount arrives as a string because a form produces one, and is parsed to
+ * exact minor units here. Nothing downstream sees the string.
  */
 export const transferIntentSchema = z.object({
   senderBankId: z.string().trim().min(1, "Select an account to send from"),
   recipientReference: z.string().trim().min(1, "Enter a recipient reference"),
+  /**
+   * Parsed to exact minor units at the server boundary.
+   *
+   * A form produces a string, so the input is a string. It stops being one
+   * immediately: everything downstream receives Money, and no float is ever
+   * involved in deciding what to move.
+   *
+   * `.trim()` is input normalisation for a form value. parseUsd itself rejects
+   * surrounding whitespace — leniency lives at the edge, not in the primitive.
+   */
   amount: z
     .string()
     .trim()
-    .regex(/^\d+(\.\d{1,2})?$/, "Enter an amount such as 10 or 10.50")
-    .refine((value) => {
-      const parsed = Number(value);
-      return Number.isFinite(parsed) && parsed > 0;
-    }, "Amount must be greater than zero"),
+    .transform((value, ctx): Money => {
+      const money = tryParseUsd(value);
+      if (!money) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Enter an amount such as 10 or 10.50",
+        });
+        return z.NEVER;
+      }
+      if (!isPositive(money)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Amount must be greater than zero",
+        });
+        return z.NEVER;
+      }
+      return money;
+    }),
   note: z.string().trim().max(200).optional().default(""),
   /**
    * Recipient email as typed by the sender.
@@ -195,6 +222,7 @@ export async function executeTransfer(
   const providerResult = await createDwollaTransfer({
     sourceFundingSourceUrl: sourceBank.fundingSourceUrl,
     destinationFundingSourceUrl: recipientBank.fundingSourceUrl,
+    // Money, not a string. The adapter decides Dwolla's wire format.
     amount: intent.amount,
   });
 
@@ -206,7 +234,8 @@ export async function executeTransfer(
   try {
     record = await createTransactionRecord({
       name: intent.note || "Transfer",
-      amount: intent.amount,
+      // Degraded to the legacy string column here and nowhere else.
+      amount: toLegacyTransactionAmount(intent.amount),
       senderId: actor.userId,
       senderBankId: sourceBank.$id,
       receiverId: relatedUserId(recipientBank.userId),

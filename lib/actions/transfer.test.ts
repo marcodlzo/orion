@@ -74,10 +74,16 @@ vi.mock("../repositories/banks.repository", () => ({
   getOwnedBankByAccountId: vi.fn(),
   createBankForActor: vi.fn(),
 }));
-vi.mock("../repositories/transactions.repository", () => ({
-  createTransactionRecord,
-  getTransactionsForOwnedBank: vi.fn(),
-}));
+vi.mock("../repositories/transactions.repository", async () => {
+  // The legacy amount adapter is real: these tests assert the exact decimal
+  // string that reaches the datastore, so stubbing it would prove nothing.
+  const { toDecimalString } = await import("../domain/money");
+  return {
+    createTransactionRecord,
+    getTransactionsForOwnedBank: vi.fn(),
+    toLegacyTransactionAmount: toDecimalString,
+  };
+});
 vi.mock("../server/dwolla", () => ({
   createDwollaTransfer,
   dwollaClient: { post: vi.fn() },
@@ -234,7 +240,8 @@ describe("G. a valid transfer", () => {
     expect(createDwollaTransfer).toHaveBeenCalledWith({
       sourceFundingSourceUrl: ALICE_BANK.fundingSourceUrl,
       destinationFundingSourceUrl: BOB_BANK.fundingSourceUrl,
-      amount: "25.00",
+      // Exact minor units, not a string. The adapter serialises it.
+      amount: { amountMinor: 2500, currency: "USD" },
     });
   });
 
@@ -254,7 +261,7 @@ describe("G. a valid transfer", () => {
       senderBankId: "bank-doc-alice", // the owned source
       receiverId: "user-doc-bob",     // the resolved recipient
       receiverBankId: "bank-doc-bob",
-      amount: "25.00",
+      amount: "25.00",  // legacy string column, produced by the exact formatter
     });
     expect(written).not.toHaveProperty("sourceFundingSourceUrl");
     expect(written).not.toHaveProperty("fundingSourceUrl");
@@ -272,9 +279,27 @@ describe("G. a valid transfer", () => {
     expect(createDwollaTransfer).toHaveBeenCalledWith({
       sourceFundingSourceUrl: ALICE_BANK.fundingSourceUrl,
       destinationFundingSourceUrl: BOB_BANK.fundingSourceUrl,
-      amount: "25.00",
+      amount: { amountMinor: 2500, currency: "USD" },
     });
   });
+
+  it.each([
+    ["10", 1000, "10.00"],
+    ["10.5", 1050, "10.50"],
+    ["0.01", 1, "0.01"],
+    ["1000.99", 100099, "1000.99"],
+  ])(
+    "form string %s becomes %d minor units and persists as %s",
+    async (input, minor, persisted) => {
+      await initiateTransfer({ ...VALID_INTENT, amount: input });
+
+      expect(createDwollaTransfer.mock.calls[0][0].amount).toEqual({
+        amountMinor: minor,
+        currency: "USD",
+      });
+      expect(createTransactionRecord.mock.calls[0][0].amount).toBe(persisted);
+    }
+  );
 });
 
 describe("H. provider failure", () => {

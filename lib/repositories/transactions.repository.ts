@@ -6,6 +6,7 @@ import { ID, Query } from "node-appwrite";
 import type { Actor } from "../auth/actor";
 import { createAdminClient } from "../appwrite";
 import { InfrastructureError } from "../auth/errors";
+import { toDecimalString, type Money } from "../domain/money";
 import { getOwnedBankByDocumentId } from "./banks.repository";
 import { NotFoundError } from "./errors";
 
@@ -13,6 +14,25 @@ const {
   APPWRITE_DATABASE_ID: DATABASE_ID,
   APPWRITE_TRANSACTION_COLLECTION_ID: TRANSACTION_COLLECTION_ID,
 } = process.env;
+
+/**
+ * TRANSITIONAL — how Money is written through the existing Appwrite schema.
+ *
+ * The transaction collection's `amount` is a String attribute holding a decimal
+ * like "25.00". That is the legacy shape and this phase does not migrate it;
+ * changing an Appwrite attribute type requires a console migration and would
+ * rewrite existing rows.
+ *
+ * The domain is NOT shaped by that constraint. Money stays integer minor units
+ * everywhere inside the application, and this single function is the only place
+ * it degrades to a decimal string. When PostgreSQL becomes the banking store it
+ * will hold canonical minor units and this adapter disappears.
+ *
+ * Uses the exact formatter, so no float is involved in producing it.
+ */
+export function toLegacyTransactionAmount(money: Money): string {
+  return toDecimalString(money);
+}
 
 export type TransactionRecord = {
   $id: string;
