@@ -15,7 +15,8 @@ import {
   describeThrown,
   formatVerificationReport,
 } from "../lib/migration/report-format";
-import { verifyMigration } from "../lib/migration/verify";
+import type { SkipCode } from "../lib/migration/mapping";
+import { defaultVerifyDeps, verifyMigration } from "../lib/migration/verify";
 
 async function main(): Promise<number> {
   if (!process.env.DATABASE_URL) {
@@ -23,7 +24,21 @@ async function main(): Promise<number> {
     return 1;
   }
 
-  const report = await verifyMigration();
+  // Per-run, per-code operator acknowledgement. Deliberately explicit: "the
+  // mapper skipped it" and "a human agreed it should be skipped" are different
+  // facts, and only the second justifies a green verification.
+  const acknowledged = process.argv
+    .filter((a) => a.startsWith("--acknowledge="))
+    .map((a) => a.split("=")[1])
+    .filter(Boolean) as SkipCode[];
+
+  const report = await verifyMigration(defaultVerifyDeps, {
+    acknowledgedSkipCodes: acknowledged,
+  });
+
+  if (acknowledged.length) {
+    console.log(`Acknowledged skip codes: ${acknowledged.join(", ")}`);
+  }
   for (const line of formatVerificationReport(report)) console.log(line);
   return report.ok ? 0 : 1;
 }

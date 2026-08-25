@@ -62,6 +62,27 @@ export type VerificationReport = {
   skippedBySource: number;
   drift: Drift[];
   ok: boolean;
+  /**
+   * WHAT `ok` ACTUALLY MEANS.
+   *
+   * Identity and linkage only. The verifier compares the Appwrite source
+   * against PostgreSQL, and the source does not contain the provider metadata —
+   * display name, official name, mask, type, subtype and currency all come from
+   * Plaid, which this command deliberately never calls.
+   *
+   * So it can prove every customer and every account link is present, correctly
+   * bridged, and not duplicated. It CANNOT prove a stored account name is the
+   * one Plaid would return today: a row reading "WRONG BUT NOT A PLACEHOLDER"
+   * for every metadata field verifies clean. The literal placeholder is caught
+   * because it is a value this tool writes, not one it validates.
+   *
+   * Recorded in the report rather than left to the reader, because "verification
+   * passed" is exactly the kind of claim that grows in the retelling.
+   */
+  scope: {
+    verified: readonly string[];
+    notVerified: readonly string[];
+  };
 };
 
 export type VerifyDeps = {
@@ -256,6 +277,20 @@ export async function verifyMigration(
       },
     },
     postgres: { customers: pgCustomers.length, accounts: pgAccounts.length },
+    scope: {
+      verified: [
+        "customer identity bridge (auth id <-> user document id)",
+        "account linkage bridge (natural key <-> legacy bank document id)",
+        "presence, absence and duplication of both",
+        "source pagination completeness",
+        "records the mapper refused to migrate",
+      ],
+      notVerified: [
+        "provider metadata correctness (name, official name, mask, type, subtype)",
+        "currency provenance beyond the schema CHECK",
+        "anything requiring a live Plaid call",
+      ],
+    },
     skippedBySource: expected.skipped.length,
     drift,
     ok: drift.length === 0,

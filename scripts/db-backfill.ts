@@ -25,12 +25,22 @@ import {
 async function main(): Promise<number> {
   const commit = process.argv.includes("--commit");
 
+  // Carry the fingerprint printed by the dry run into the commit. Without it a
+  // dry run of dataset A can be followed by a commit of dataset B, and nothing
+  // notices.
+  const expect = process.argv
+    .find((a) => a.startsWith("--expect-source="))
+    ?.split("=")[1];
+
   if (!process.env.DATABASE_URL) {
     console.error("DATABASE_URL is not set.");
     return 1;
   }
 
-  const report = await runBackfill({ dryRun: !commit });
+  const report = await runBackfill({
+    dryRun: !commit,
+    ...(expect ? { expectSourceFingerprint: expect } : {}),
+  });
   for (const line of formatBackfillReport(report)) console.log(line);
 
   // A failed write is an error even though the tool completed, and so is a

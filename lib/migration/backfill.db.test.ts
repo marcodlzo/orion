@@ -9,7 +9,7 @@ import type {
   LegacyUserDocument,
   SourceScan,
 } from "./appwrite-source";
-import { runBackfill, type BackfillDeps } from "./backfill";
+import { MIGRATION_LOCK_KEY, runBackfill, type BackfillDeps } from "./backfill";
 import { FALLBACK_METADATA, type EnrichmentOutcome } from "./enrichment";
 import { verifyMigration, type VerifyDeps } from "./verify";
 import {
@@ -64,6 +64,7 @@ const scan = <T,>(documents: T[]): SourceScan<T> => ({
   reportedTotal: documents.length,
   pages: 1,
   complete: true,
+  fingerprint: `fp-${documents.length}`,
 });
 
 const goodMetadata = (n: number): EnrichmentOutcome => ({
@@ -99,6 +100,9 @@ function realDeps(
     readBanks: async () => scan(banks),
     enrich,
     runInTransaction: withTransaction,
+    acquireLock: async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock($1)", [MIGRATION_LOCK_KEY]);
+    },
     upsertCustomer: upsertBankingCustomer,
     upsertAccount: upsertLinkedAccount,
   };
@@ -491,5 +495,112 @@ describe("verification against real PostgreSQL", () => {
     // The orphan is still there afterwards. A tool that deleted it would be
     // destroying financial history on its own initiative.
     expect(await snapshot()).toEqual(before);
+  });
+});
+
+/**
+ * CONCURRENT RERUNS, GENUINELY IN PARALLEL.
+ *
+ * A sequential rerun proves nothing about a race. Before the advisory lock,
+ * two identical runs launched with Promise.all produced one success and one
+ * 23505 on banking_customers_appwrite_user_document_id_key — the stored result
+ * was correct, but an operator could not tell that failure from a real one.
+ */
+describe("concurrent reruns against real PostgreSQL", () => {
+  const users = [user(1), user(2)];
+  const banks = [bank(1, 1), bank(2, 2)];
+
+  it("both runs succeed and neither reports a spurious failure", async () => {
+    const [a, b] = await Promise.all([
+      runBackfill({ dryRun: false }, realDeps(users, banks)),
+      runBackfill({ dryRun: false }, realDeps(users, banks)),
+    ]);
+
+    expect(a.outcome).toBe("committed");
+    expect(b.outcome).toBe("committed");
+    expect(a.failures).toEqual([]);
+    expect(b.failures).toEqual([]);
+  });
+
+  it("stores exactly one row per record regardless of the race", async () => {
+    await Promise.all([
+      runBackfill({ dryRun: false }, realDeps(users, banks)),
+      runBackfill({ dryRun: false }, realDeps(users, banks)),
+    ]);
+
+    const after = await snapshot();
+    expect(after.customers).toHaveLength(2);
+    expect(after.accounts).toHaveLength(2);
+  });
+
+  it("exactly one of the two runs reports the creations", async () => {
+    const [a, b] = await Promise.all([
+      runBackfill({ dryRun: false }, realDeps(users, banks)),
+      runBackfill({ dryRun: false }, realDeps(users, banks)),
+    ]);
+
+    // The lock serialises them, so one run creates and the other finds
+    // everything already present. Both are honest reports of what they did.
+    const created = [a, b].map((r) => r.customers.created).sort();
+    const existing = [a, b].map((r) => r.customers.existing).sort();
+    expect(created).toEqual([0, 2]);
+    expect(existing).toEqual([0, 2]);
+  });
+
+  it("survives three at once", async () => {
+    const reports = await Promise.all([
+      runBackfill({ dryRun: false }, realDeps(users, banks)),
+      runBackfill({ dryRun: false }, realDeps(users, banks)),
+      runBackfill({ dryRun: false }, realDeps(users, banks)),
+    ]);
+
+    expect(reports.every((r) => r.outcome === "committed")).toBe(true);
+    expect(reports.every((r) => r.failures.length === 0)).toBe(true);
+    expect((await snapshot()).customers).toHaveLength(2);
+  });
+
+  it("a concurrent dry run does not corrupt a concurrent commit", async () => {
+    const [dry, wet] = await Promise.all([
+      runBackfill({ dryRun: true }, realDeps(users, banks)),
+      runBackfill({ dryRun: false }, realDeps(users, banks)),
+    ]);
+
+    expect(dry.outcome).toBe("dry-run");
+    expect(wet.outcome).toBe("committed");
+
+    // The dry run rolled back whatever it wrote; the commit's rows stand.
+    const after = await snapshot();
+    expect(after.customers).toHaveLength(2);
+    expect(after.accounts).toHaveLength(2);
+  });
+});
+
+describe("source fingerprint against real PostgreSQL", () => {
+  const users = [user(1)];
+  const banks = [bank(1, 1)];
+
+  it("refuses to commit a dataset the dry run did not approve", async () => {
+    const dry = await runBackfill({ dryRun: true }, realDeps(users, banks));
+
+    // The source grew between the dry run and the commit.
+    const report = await runBackfill(
+      { dryRun: false, expectSourceFingerprint: dry.source.fingerprint },
+      realDeps([...users, user(2)], [...banks, bank(2, 2)])
+    );
+
+    expect(report.outcome).toBe("refused");
+    expect(await snapshot()).toMatchObject({ customers: [], accounts: [] });
+  });
+
+  it("commits the dataset the dry run did approve", async () => {
+    const dry = await runBackfill({ dryRun: true }, realDeps(users, banks));
+
+    const report = await runBackfill(
+      { dryRun: false, expectSourceFingerprint: dry.source.fingerprint },
+      realDeps(users, banks)
+    );
+
+    expect(report.outcome).toBe("committed");
+    expect((await snapshot()).customers).toHaveLength(1);
   });
 });

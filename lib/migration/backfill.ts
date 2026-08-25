@@ -37,6 +37,15 @@ export type SourceEvidence = {
   users: { scanned: number; reportedTotal: number; pages: number; complete: boolean };
   banks: { scanned: number; reportedTotal: number; pages: number; complete: boolean };
   complete: boolean;
+  /**
+   * Digest of the exact dataset this run read.
+   *
+   * A dry run and the commit that follows it re-read Appwrite independently.
+   * Carrying this value from one to the other — via --expect-source — is what
+   * turns "the dry run looked fine" into a statement about the dataset actually
+   * committed.
+   */
+  fingerprint: string;
 };
 
 /**
@@ -88,15 +97,37 @@ export type BackfillDeps = {
     externalAccountId: string;
   }) => Promise<EnrichmentOutcome>;
   runInTransaction: <T>(fn: (client: TransactionClient) => Promise<T>) => Promise<T>;
+  /** Serialises concurrent migrations. See MIGRATION_LOCK_KEY. */
+  acquireLock: (client: TransactionClient) => Promise<void>;
   upsertCustomer: typeof upsertBankingCustomer;
   upsertAccount: typeof upsertLinkedAccount;
 };
+
+/**
+ * Advisory-lock key for the backfill. Arbitrary but fixed.
+ *
+ * Two backfills running at once against the same dataset both try to insert the
+ * same customer. `ON CONFLICT (appwrite_auth_id)` only arbitrates that one
+ * index, so the loser's INSERT can still trip the unique index on
+ * appwrite_user_document_id and fail with 23505 — an unchanged re-run reporting
+ * a failure that is nothing but a race with itself.
+ *
+ * The stored result was always correct, because the schema does its job. The
+ * OPERATIONAL semantics were not: an operator cannot tell that failure from a
+ * real one. A transaction-scoped advisory lock makes the second run wait and
+ * then take the ordinary "already present" path. It is released automatically
+ * on commit or rollback, so a crashed run cannot leave it held.
+ */
+export const MIGRATION_LOCK_KEY = 4_812_007;
 
 export const defaultDeps: BackfillDeps = {
   readUsers: readAllLegacyUsers,
   readBanks: readAllLegacyBanks,
   enrich: fetchAccountMetadata,
   runInTransaction: withTransaction,
+  acquireLock: async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock($1)", [MIGRATION_LOCK_KEY]);
+  },
   upsertCustomer: upsertBankingCustomer,
   upsertAccount: upsertLinkedAccount,
 };
@@ -142,7 +173,7 @@ type EnrichedAccount = {
  * become a database problem.
  */
 export async function runBackfill(
-  options: { dryRun: boolean },
+  options: { dryRun: boolean; expectSourceFingerprint?: string },
   deps: BackfillDeps = defaultDeps
 ): Promise<BackfillReport> {
   const startedAt = new Date().toISOString();
@@ -164,6 +195,7 @@ export async function runBackfill(
       complete: bankScan.complete,
     },
     complete: userScan.complete && bankScan.complete,
+    fingerprint: `${userScan.fingerprint}.${bankScan.fingerprint}`,
   };
 
   const emptyReport = (
@@ -198,6 +230,21 @@ export async function runBackfill(
       "refused",
       `source read was incomplete (users ${evidence.users.scanned}/${evidence.users.reportedTotal}, ` +
         `banks ${evidence.banks.scanned}/${evidence.banks.reportedTotal}); re-run when the source is stable`
+    );
+  }
+
+  // ---- REFUSE WHEN THE SOURCE MOVED SINCE THE APPROVED DRY RUN ------------
+  //
+  // Appwrite stays live throughout, so a dry run approves dataset A and the
+  // commit could apply dataset B. Counts cannot detect that — one delete plus
+  // one insert leaves them identical.
+  if (
+    options.expectSourceFingerprint &&
+    options.expectSourceFingerprint !== evidence.fingerprint
+  ) {
+    return emptyReport(
+      "refused",
+      `source changed since the approved dry run (expected ${options.expectSourceFingerprint}, found ${evidence.fingerprint})`
     );
   }
 
@@ -264,6 +311,11 @@ export async function runBackfill(
 
   // ---- phase 3: one transaction, no network ------------------------------
   const work = async (client: TransactionClient) => {
+    // FIRST statement in the transaction. Held until commit or rollback, so a
+    // concurrent backfill waits here instead of racing into a unique-violation
+    // on an index the ON CONFLICT arbiter does not cover.
+    await deps.acquireLock(client);
+
     // user document id -> PostgreSQL customer UUID
     const customerIds = new Map<string, string>();
 

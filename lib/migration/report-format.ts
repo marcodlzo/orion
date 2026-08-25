@@ -71,6 +71,7 @@ export function formatBackfillReport(report: BackfillReport): string[] {
   // Source evidence, not just counts: "12 customers migrated" is equally true
   // of a complete read and of one that stopped after the first page.
   out.push(scanLine("users", users), scanLine("banks", banks));
+  out.push(`source digest     ${report.source.fingerprint}`);
   out.push(
     `customers         ${report.customers.created} created, ${report.customers.existing} already present, ${report.customers.failed} failed`,
     `linked accounts   ${report.accounts.created} created, ${report.accounts.updated} updated, ${report.accounts.blocked} blocked, ${report.accounts.failed} failed`,
@@ -122,7 +123,11 @@ export function formatBackfillReport(report: BackfillReport): string[] {
     out.push("SOURCE READ WAS INCOMPLETE. Do not treat this run as a complete migration.");
   }
   if (report.outcome === "dry-run") {
-    out.push("Nothing was written. Re-run with --commit to apply.");
+    out.push("Nothing was written. To apply exactly this dataset:");
+    out.push(
+      `  npm run db:backfill:commit -- --expect-source=${report.source.fingerprint}`
+    );
+    out.push("The commit refuses if the source changed in the meantime.");
   }
 
   return out.map(redactSecrets);
@@ -143,7 +148,11 @@ export function formatVerificationReport(report: VerificationReport): string[] {
   );
 
   if (report.ok) {
-    out.push("", "No drift. PostgreSQL matches the legacy dataset.");
+    // Scoped deliberately. "No drift" previously read as "the migration is
+    // correct", which is more than this command can establish.
+    out.push("", "No drift in identity or linkage.");
+    out.push("", "NOT checked by this command:");
+    for (const item of report.scope.notVerified) out.push(`  - ${item}`);
   } else {
     const byCategory = new Map<string, typeof report.drift>();
     for (const d of report.drift) {

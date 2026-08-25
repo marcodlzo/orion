@@ -25,6 +25,7 @@ const scan = <T,>(documents: T[], over: Partial<SourceScan<T>> = {}): SourceScan
   reportedTotal: documents.length,
   pages: 1,
   complete: true,
+  fingerprint: "fp-test",
   ...over,
 });
 
@@ -67,8 +68,9 @@ function fakeDatabase() {
 
   const deps: Pick<
     BackfillDeps,
-    "runInTransaction" | "upsertCustomer" | "upsertAccount"
+    "runInTransaction" | "acquireLock" | "upsertCustomer" | "upsertAccount"
   > = {
+    acquireLock: async () => undefined,
     runInTransaction: async <T,>(
       fn: (client: TransactionClient) => Promise<T>
     ): Promise<T> => {
@@ -1074,5 +1076,122 @@ describe("runBackfill — outcome reflects the database", () => {
     // cause rather than the thrown value itself.
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as { cause?: unknown }).cause).toBeInstanceOf(TypeError);
+  });
+});
+
+/**
+ * BINDING A DRY RUN TO WHAT IT APPROVED.
+ *
+ * Appwrite stays live, so a dry run reads dataset A and the commit that follows
+ * independently reads whatever is there then. Counts cannot detect a change —
+ * one delete plus one insert leaves them identical.
+ */
+describe("runBackfill — source fingerprint binding", () => {
+  it("reports a fingerprint for the dataset it read", async () => {
+    const report = await runBackfill({ dryRun: true }, deps());
+
+    expect(report.source.fingerprint).toBeTruthy();
+  });
+
+  it("commits when the fingerprint still matches", async () => {
+    const dry = await runBackfill({ dryRun: true }, deps());
+
+    const wet = await runBackfill(
+      { dryRun: false, expectSourceFingerprint: dry.source.fingerprint },
+      deps()
+    );
+
+    expect(wet.outcome).toBe("committed");
+  });
+
+  it("REFUSES when the source moved since the dry run", async () => {
+    const db = fakeDatabase();
+
+    const report = await runBackfill(
+      { dryRun: false, expectSourceFingerprint: "fp-from-an-older-dry-run" },
+      deps({ ...db.deps })
+    );
+
+    expect(report.outcome).toBe("refused");
+    expect(report.refusedBecause).toContain("source changed");
+    expect(db.committed.customers).toHaveLength(0);
+  });
+
+  it("makes no provider call when it refuses on a changed source", async () => {
+    const enrich = vi.fn(async () => ({
+      ok: true as const,
+      currency: "USD",
+      metadata: FALLBACK_METADATA,
+    }));
+
+    await runBackfill(
+      { dryRun: false, expectSourceFingerprint: "stale" },
+      deps({ enrich })
+    );
+
+    expect(enrich).not.toHaveBeenCalled();
+  });
+
+  it("runs unbound when no fingerprint is supplied", async () => {
+    // The flag is opt-in. Requiring it would make a first run impossible.
+    const report = await runBackfill({ dryRun: false }, deps());
+
+    expect(report.outcome).toBe("committed");
+  });
+});
+
+/**
+ * SERIALISING CONCURRENT MIGRATIONS.
+ *
+ * Two backfills at once both insert the same customer. ON CONFLICT arbitrates
+ * only appwrite_auth_id, so the loser can still trip the unique index on
+ * appwrite_user_document_id and report a 23505 that is nothing but a race with
+ * itself.
+ */
+describe("runBackfill — migration lock", () => {
+  it("takes the lock as the FIRST statement in the transaction", async () => {
+    const order: string[] = [];
+    const db = fakeDatabase();
+
+    await runBackfill(
+      { dryRun: false },
+      deps({
+        acquireLock: async () => {
+          order.push("lock");
+        },
+        upsertCustomer: async (input, client) => {
+          order.push("customer");
+          return db.deps.upsertCustomer(input, client);
+        },
+        upsertAccount: db.deps.upsertAccount,
+        runInTransaction: db.deps.runInTransaction,
+      })
+    );
+
+    // A lock taken after the first write would leave a window in which two runs
+    // both insert.
+    expect(order[0]).toBe("lock");
+  });
+
+  it("takes the lock during a dry run too", async () => {
+    const acquireLock = vi.fn(async () => undefined);
+
+    await runBackfill({ dryRun: true }, deps({ acquireLock }));
+
+    expect(acquireLock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not take the lock when the run is refused", async () => {
+    const acquireLock = vi.fn(async () => undefined);
+
+    await runBackfill(
+      { dryRun: false },
+      deps({
+        acquireLock,
+        readBanks: async () => scan([bank()], { reportedTotal: 40, complete: false }),
+      })
+    );
+
+    expect(acquireLock).not.toHaveBeenCalled();
   });
 });

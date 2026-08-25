@@ -63,6 +63,7 @@ const backfillReport = (over: Partial<BackfillReport> = {}): BackfillReport => (
     users: { scanned: 2, reportedTotal: 2, pages: 1, complete: true },
     banks: { scanned: 2, reportedTotal: 2, pages: 1, complete: true },
     complete: true,
+    fingerprint: "fp-committed",
   },
   customers: { created: 2, existing: 0, failed: 0 },
   accounts: { created: 2, updated: 0, failed: 0, blocked: 0 },
@@ -91,6 +92,7 @@ const verificationReport = (
   skippedBySource: 0,
   drift: [],
   ok: true,
+  scope: { verified: ["identity"], notVerified: ["provider metadata"] },
   ...over,
 });
 
@@ -185,6 +187,7 @@ describe("formatBackfillReport — content", () => {
           users: { scanned: 3, reportedTotal: 90, pages: 1, complete: false },
           banks: { scanned: 2, reportedTotal: 2, pages: 1, complete: true },
           complete: false,
+          fingerprint: "fp-short",
         },
       })
     ).join("\n");
@@ -269,6 +272,7 @@ describe("formatBackfillReport — content", () => {
           users: { scanned: 3, reportedTotal: 90, pages: 1, complete: false },
           banks: { scanned: 2, reportedTotal: 2, pages: 1, complete: true },
           complete: false,
+          fingerprint: "fp-short",
         },
       })
     ).join("\n");

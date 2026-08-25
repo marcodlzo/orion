@@ -102,6 +102,32 @@ lands or none of it does.
 A half-migrated financial dataset is worse than an un-migrated one: it is no
 longer obvious which store is authoritative, and the answer differs per record.
 
+### Dry run and commit are bound together
+
+Appwrite stays live throughout, so a dry run reads dataset A and the commit that
+follows independently reads whatever is there then. Counts cannot detect the
+difference — one delete plus one insert leaves them identical.
+
+Every run therefore reports a **source digest**, and the dry run prints the exact
+command to apply what it approved:
+
+```bash
+npm run db:backfill:commit -- --expect-source=<digest>
+```
+
+The commit refuses if the source moved. The flag is opt-in — requiring it would
+make a first run impossible — but a cutover should always use it.
+
+### Only one migration runs at a time
+
+The transaction takes a PostgreSQL advisory lock as its first statement. Two
+backfills launched concurrently both insert the same customer, and
+`ON CONFLICT (appwrite_auth_id)` arbitrates only that one index — the loser could
+still trip the unique index on `appwrite_user_document_id` and report a `23505`
+that was nothing but a race with itself. The stored data was always correct; the
+*report* was not. The lock releases on commit or rollback, so a crashed run
+cannot leave it held.
+
 ### Re-running is safe
 
 Both repositories upsert. Re-run freely — after a Plaid outage, after fixing a
@@ -130,10 +156,17 @@ correct account name with the placeholder `"Linked account"` whenever a re-run
 happens while Plaid is unreachable. The row count is unchanged, so a
 count-based idempotency check reports success while the data is quietly worse.
 
-So the repository takes `metadataKnown`. When enrichment failed, every metadata
-column keeps the value it already had; the placeholder is written **only** on a
-first insert, where `display_name NOT NULL` requires something. The provider
-failure is still reported either way.
+So the repository takes `metadataKnown`: when enrichment failed, every metadata
+column keeps the value it already had.
+
+That protection now sits behind a stronger one. **An account whose currency the
+provider did not positively confirm is not written at all** — not with a
+placeholder, not with an assumed `'USD'`. `currency` is `NOT NULL` with a
+`CHECK` of `'USD'`, so inserting an unverified account asserts a fact nobody
+checked, and an unreachable Item could be hiding a CAD account. The customer
+still migrates; the account is reported as blocked and a later run inserts it
+once Plaid answers. `metadataKnown` remains as defence in depth for any future
+caller.
 
 Proven by `repositories.db.test.ts` (repository level) and `backfill.db.test.ts`
 (end to end), both against real PostgreSQL, and both verified to fail when the
@@ -186,8 +219,21 @@ deliberate and is not to be "fixed" by tightening the index.
 A skip is a finding, not an error. The command still exits `0` — deciding what
 to do about a malformed legacy record is an operator's call.
 
-**Write failures** are different: they exit `1`. Because the run is one
-transaction, a write failure means nothing was committed.
+**Write failures** are different: they exit `1`, and the run stops at the first
+one. Because the run is one transaction, a write failure means nothing was
+committed — and the report says so rather than printing the counters it had
+accumulated before the abort. Every report carries an outcome:
+
+| Outcome | Meaning |
+|---|---|
+| `committed` | Every write is durable. |
+| `dry-run` | Writes executed and were undone. Counters are a forecast. |
+| `rolled-back` | A failure aborted the transaction. **Nothing** was written; counters are zero. |
+| `refused` | Stopped before any provider call or write. Nothing happened at all. |
+
+A run is refused when the source read was incomplete, or when `--expect-source`
+does not match. Refusal happens before enrichment, so it costs nothing and
+reaches neither Plaid nor PostgreSQL.
 
 **Enrichment failures** split in two, because they call for different actions:
 
@@ -230,6 +276,41 @@ backfill agrees with itself.
 
 It exits non-zero when drift exists, so it can gate a cutover rather than merely
 inform one.
+
+### What a green verification does and does not prove
+
+**Proved:** every customer and account link is present, correctly bridged, not
+duplicated; the source was read completely; and no source record was silently
+dropped.
+
+**Not proved:** that stored provider metadata is *correct*. The verifier
+compares Appwrite against PostgreSQL, and Appwrite does not hold the metadata —
+name, official name, mask, type, subtype and currency all come from Plaid, which
+this command deliberately never calls. A row containing plausible-but-wrong
+values for every metadata field verifies clean. The literal `"Linked account"`
+placeholder is caught only because it is a value this tool writes, not one it
+validates.
+
+The command prints this limitation on every successful run, and the report
+carries it in `scope.notVerified`. "Verification passed" is exactly the kind of
+claim that grows in the retelling.
+
+### Skipped records fail verification
+
+A record the mapper refused to migrate is a record that is **not** in
+PostgreSQL. It used to be counted and then followed by "No drift", which told
+the operator the two stores matched while a customer's account had been dropped.
+
+Every skip is now drift. An operator who has judged a specific code acceptable
+for this dataset can acknowledge it explicitly:
+
+```bash
+npm run db:verify -- --acknowledge=MISSING_AUTH_ID
+```
+
+Acknowledgement is per-code and per-run, because "the mapper skipped it" and "a
+human agreed it should be skipped" are different facts and only the second
+justifies a green result.
 
 **It never repairs anything.** Deleting a PostgreSQL customer because Appwrite
 no longer has the document would destroy financial history on a tool's

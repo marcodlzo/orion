@@ -112,9 +112,22 @@ Security-relevant properties, each enforced by a test rather than a convention:
   classification (`name / SQLSTATE / constraint`), never the driver's message,
   because a constraint violation quotes the offending row and a Plaid error
   echoes the request that contained the access token. Unique sentinel values are
-  asserted absent from stored rows, reports, error messages, error stacks and
-  JSON across success, provider failure, database failure, dry run and
-  verification paths.
+  asserted absent from stored rows, reports, error messages, error stacks,
+  stdout, stderr and JSON across success, provider failure, database failure,
+  dry run and verification paths.
+
+  **What redaction does NOT claim.** Operator output redacts the *password* from
+  a connection URL and keeps scheme, user, host and database, so a failure still
+  says which database it was. So "the database password never appears in output"
+  is true; "no part of `DATABASE_URL` appears in output" is false, and is not
+  claimed. Redaction also only catches recognisable shapes — a secret with no
+  distinguishing form and no announcing key survives it. It is a backstop for
+  third-party error messages, not a substitute for reports that carry no secret
+  in the first place, and there is a passing test that says so.
+
+- **Provider calls have a deadline.** `PLAID_TIMEOUT_MS` (15s default). Without
+  one a promise that never settles stalls the migration silently — the error
+  handling only catches calls that *reject*.
 
 See [`docs/migration/appwrite-to-postgresql.md`](docs/migration/appwrite-to-postgresql.md)
 for the full contract, including what each claim rests on.

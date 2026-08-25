@@ -16,6 +16,7 @@ const scan = <T,>(documents: T[], over: Partial<SourceScan<T>> = {}): SourceScan
   reportedTotal: documents.length,
   pages: 1,
   complete: true,
+  fingerprint: "fp-test",
   ...over,
 });
 

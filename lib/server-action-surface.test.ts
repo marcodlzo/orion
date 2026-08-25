@@ -135,14 +135,33 @@ describe("stripComments", () => {
  * part of this repository's graph.
  */
 function resolveRuntimeImports(code: string, rel: string): string[] {
-  const out: string[] = [];
-  const IMPORT = /(?:^|[\n;])\s*(?:import|export)\s+([\s\S]*?)\bfrom\s+["']([^"']+)["']/g;
+  const specifiers: string[] = [];
 
+  // `import … from "x"` / `export … from "x"`, skipping type-only forms.
+  const FROM = /(?:^|[\n;])\s*(?:import|export)\s+([\s\S]*?)\bfrom\s+["']([^"']+)["']/g;
   let m: RegExpExecArray | null;
-  while ((m = IMPORT.exec(code)) !== null) {
+  while ((m = FROM.exec(code)) !== null) {
     if (/^type\b/.test(m[1].trim())) continue; // erased at compile time
+    specifiers.push(m[2]);
+  }
 
-    const spec = m[2];
+  // The three forms the earlier parser missed. Each executes the target module
+  // exactly as a named import does, so a containment claim that ignored them
+  // was broader than the check behind it:
+  //
+  //   import "./x"        side effect — runs the module for its top level alone
+  //   import("./x")       dynamic — runs it later, but still runs it
+  //   require("./x")      CommonJS — the form tsx actually emits
+  const SIDE_EFFECT = /(?:^|[\n;])\s*import\s+["']([^"']+)["']/g;
+  const DYNAMIC = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
+  const REQUIRE = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g;
+
+  for (const re of [SIDE_EFFECT, DYNAMIC, REQUIRE]) {
+    while ((m = re.exec(code)) !== null) specifiers.push(m[1]);
+  }
+
+  const out: string[] = [];
+  for (const spec of specifiers) {
     let base: string;
     if (spec.startsWith("@/")) base = join(ROOT, spec.slice(2));
     else if (spec.startsWith(".")) base = join(ROOT, rel, "..", spec);
@@ -151,7 +170,8 @@ function resolveRuntimeImports(code: string, rel: string): string[] {
     for (const cand of [base + ".ts", base + ".tsx", join(base, "index.ts")]) {
       try {
         statSync(cand);
-        out.push(cand.slice(ROOT.length).replace(/\\/g, "/"));
+        const resolved = cand.slice(ROOT.length).replace(/\\/g, "/");
+        if (!out.includes(resolved)) out.push(resolved);
         break;
       } catch {
         /* not this extension */
@@ -160,6 +180,67 @@ function resolveRuntimeImports(code: string, rel: string): string[] {
   }
   return out;
 }
+
+/**
+ * The parser behind every containment claim in this file, tested directly.
+ *
+ * It previously recognised only `import … from`, so a side-effect, dynamic or
+ * CommonJS import of the unscoped legacy reader would have been invisible to
+ * the suite while executing perfectly well at run time. A guard is only as
+ * broad as its parser.
+ */
+describe("resolveRuntimeImports", () => {
+  const FROM = "lib/actions/example.ts";
+  const TARGET = "lib/migration/appwrite-source.ts";
+
+  it("sees a named import", () => {
+    const code = 'import { readAllLegacyUsers } from "../migration/appwrite-source";';
+    expect(resolveRuntimeImports(code, FROM)).toContain(TARGET);
+  });
+
+  it("sees a SIDE-EFFECT import", () => {
+    expect(resolveRuntimeImports('import "../migration/appwrite-source";', FROM)).toContain(
+      TARGET
+    );
+  });
+
+  it("sees a DYNAMIC import", () => {
+    const code = 'const m = await import("../migration/appwrite-source");';
+    expect(resolveRuntimeImports(code, FROM)).toContain(TARGET);
+  });
+
+  it("sees a CommonJS require", () => {
+    const code = 'const m = require("../migration/appwrite-source");';
+    expect(resolveRuntimeImports(code, FROM)).toContain(TARGET);
+  });
+
+  it("sees an @/ alias", () => {
+    expect(
+      resolveRuntimeImports('import "@/lib/migration/appwrite-source";', FROM)
+    ).toContain(TARGET);
+  });
+
+  it("still ignores a type-only import", () => {
+    const code = 'import type { LegacyUserDocument } from "../migration/appwrite-source";';
+    expect(resolveRuntimeImports(code, FROM)).toEqual([]);
+  });
+
+  it("ignores bare package specifiers", () => {
+    // Not part of this repository's graph. `import "server-only"` is the common
+    // case and must not resolve to anything.
+    expect(resolveRuntimeImports('import "server-only";', FROM)).toEqual([]);
+    expect(resolveRuntimeImports('import { z } from "zod";', FROM)).toEqual([]);
+  });
+
+  it("does not report the same module twice", () => {
+    const code = [
+      'import { readAllLegacyUsers } from "../migration/appwrite-source";',
+      'import "../migration/appwrite-source";',
+    ].join("\n");
+
+    expect(resolveRuntimeImports(code, FROM).filter((f) => f === TARGET)).toHaveLength(1);
+  });
+});
 
 function findActionModules(): ActionModule[] {
   const files: string[] = [];
