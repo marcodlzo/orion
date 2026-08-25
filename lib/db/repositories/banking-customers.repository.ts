@@ -8,7 +8,7 @@ import "server-only";
 import type { PoolClient } from "pg";
 
 import { query } from "../pool";
-import { toDatabaseError } from "../errors";
+import { IdentityConflictError, toDatabaseError } from "../errors";
 
 export type BankingCustomerRow = {
   id: string;
@@ -49,9 +49,15 @@ async function run<T extends Record<string, unknown>>(
  * write of the same value rather than DO NOTHING, because DO NOTHING returns no
  * row and the caller needs the id.
  *
- * A record whose auth id matches but whose document id differs is NOT silently
- * repaired — that is a genuine identity conflict and the unique constraint on
- * appwrite_user_document_id will reject it. Reporting it is the caller's job.
+ * A record whose auth id matches but whose document id DIFFERS raises
+ * IdentityConflictError.
+ *
+ * The unique index on appwrite_user_document_id does not catch this, contrary
+ * to what this comment used to claim: the conflict path never attempts to write
+ * the differing value, so nothing is violated. The upsert simply kept the
+ * stored bridge and reported `created: false`, and the caller had no way to
+ * tell that from an ordinary re-run. A later run could then attach accounts
+ * using an identity mapping the database says belongs to another document.
  */
 export async function upsertBankingCustomer(
   input: BankingCustomerInput,
@@ -68,6 +74,15 @@ export async function upsertBankingCustomer(
   );
 
   const row = rows[0];
+
+  if (row.appwrite_user_document_id !== input.appwriteUserDocumentId) {
+    throw new IdentityConflictError({
+      field: `banking_customers.appwrite_auth_id=${input.appwriteAuthId}`,
+      stored: row.appwrite_user_document_id,
+      incoming: input.appwriteUserDocumentId,
+    });
+  }
+
   // xmax = 0 distinguishes a genuine INSERT from an UPDATE taken by the
   // conflict path. Without it a re-run would report every row as newly created.
   return { row, created: row.inserted };

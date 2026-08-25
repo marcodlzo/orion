@@ -51,7 +51,15 @@ export function describeThrown(error: unknown): string {
 }
 
 export function formatBackfillReport(report: BackfillReport): string[] {
-  const mode = report.dryRun ? "DRY RUN — nothing was written" : "COMMITTED";
+  // The heading states what happened to the DATABASE, not what was requested.
+  // "COMMITTED" over counters that PostgreSQL rolled back is a false statement
+  // about the system of record.
+  const mode = {
+    "committed": "COMMITTED",
+    "dry-run": "DRY RUN — nothing was written",
+    "rolled-back": "ROLLED BACK — NOTHING WAS WRITTEN",
+    "refused": "REFUSED — nothing was attempted",
+  }[report.outcome];
   const { users, banks } = report.source;
   const out: string[] = [];
 
@@ -101,10 +109,19 @@ export function formatBackfillReport(report: BackfillReport): string[] {
   }
 
   out.push(RULE);
+  if (report.outcome === "refused") {
+    out.push(`REFUSED: ${report.refusedBecause ?? "precondition not met"}`);
+    out.push("No provider calls were made and no rows were written.");
+  }
+  if (report.outcome === "rolled-back") {
+    out.push(
+      "The transaction aborted. PostgreSQL discarded every write, so the counters above are all zero."
+    );
+  }
   if (!report.source.complete) {
     out.push("SOURCE READ WAS INCOMPLETE. Do not treat this run as a complete migration.");
   }
-  if (report.dryRun) {
+  if (report.outcome === "dry-run") {
     out.push("Nothing was written. Re-run with --commit to apply.");
   }
 

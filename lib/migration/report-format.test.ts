@@ -56,6 +56,7 @@ afterEach(() => {
 
 const backfillReport = (over: Partial<BackfillReport> = {}): BackfillReport => ({
   dryRun: false,
+  outcome: "committed",
   startedAt: "2026-01-01T00:00:00.000Z",
   finishedAt: "2026-01-01T00:00:01.000Z",
   source: {
@@ -222,7 +223,9 @@ describe("formatBackfillReport — content", () => {
   });
 
   it("says nothing was written after a dry run", () => {
-    const lines = formatBackfillReport(backfillReport({ dryRun: true })).join("\n");
+    const lines = formatBackfillReport(
+      backfillReport({ dryRun: true, outcome: "dry-run" })
+    ).join("\n");
 
     expect(lines).toContain("DRY RUN");
     expect(lines).toContain("Nothing was written");
@@ -233,6 +236,46 @@ describe("formatBackfillReport — content", () => {
 
     expect(lines).toContain("COMMITTED");
     expect(lines).not.toContain("Nothing was written");
+  });
+
+  it("never says COMMITTED about a transaction that rolled back", () => {
+    // The defect this replaces: counters accumulated before an abort were
+    // printed under a COMMITTED heading, describing a database state that did
+    // not exist.
+    const lines = formatBackfillReport(
+      backfillReport({
+        outcome: "rolled-back",
+        customers: { created: 0, existing: 0, failed: 1 },
+        accounts: { created: 0, updated: 0, failed: 0, blocked: 0 },
+        failures: [
+          { kind: "customer", id: "(transaction)", reason: "ConstraintViolationError / 23514 / x" },
+        ],
+      })
+    ).join("\n");
+
+    expect(lines).toContain("ROLLED BACK");
+    expect(lines).not.toContain("COMMITTED");
+    expect(lines).toContain("PostgreSQL discarded every write");
+  });
+
+  it("says plainly when a run was refused before doing anything", () => {
+    const lines = formatBackfillReport(
+      backfillReport({
+        outcome: "refused",
+        refusedBecause: "source read was incomplete (users 3/90)",
+        customers: { created: 0, existing: 0, failed: 0 },
+        accounts: { created: 0, updated: 0, failed: 0, blocked: 0 },
+        source: {
+          users: { scanned: 3, reportedTotal: 90, pages: 1, complete: false },
+          banks: { scanned: 2, reportedTotal: 2, pages: 1, complete: true },
+          complete: false,
+        },
+      })
+    ).join("\n");
+
+    expect(lines).toContain("REFUSED");
+    expect(lines).toContain("No provider calls were made and no rows were written");
+    expect(lines).not.toContain("COMMITTED");
   });
 
   it("prints every skip with its code", () => {

@@ -16,7 +16,7 @@ import {
   type LegacyUserDocument,
   type SourceScan,
 } from "./appwrite-source";
-import { planMigration } from "./mapping";
+import { planMigration, type SkipCode } from "./mapping";
 
 export type Drift = {
   category:
@@ -27,9 +27,22 @@ export type Drift = {
     | "mismatched-customer"
     | "mismatched-account"
     | "unenriched-account"
-    | "incomplete-source-scan";
+    | "incomplete-source-scan"
+    | "unmigrated-source-record";
   id: string;
   detail: string;
+};
+
+/**
+ * Skip codes an operator has judged acceptable for this dataset.
+ *
+ * Deliberately explicit and per-run rather than a built-in allowlist. A source
+ * record that will never migrate is a real gap in the migration, and "the
+ * mapper decided to skip it" is not the same fact as "a human agreed it should
+ * be skipped". Passing a code here records the second.
+ */
+export type VerifyOptions = {
+  acknowledgedSkipCodes?: readonly SkipCode[];
 };
 
 export type VerificationReport = {
@@ -78,8 +91,10 @@ export const defaultVerifyDeps: VerifyDeps = {
  * a mistake becomes permanent.
  */
 export async function verifyMigration(
-  deps: VerifyDeps = defaultVerifyDeps
+  deps: VerifyDeps = defaultVerifyDeps,
+  options: VerifyOptions = {}
 ): Promise<VerificationReport> {
+  const acknowledged = new Set<SkipCode>(options.acknowledgedSkipCodes ?? []);
   const [userScan, bankScan, pgCustomers, pgAccounts] = await Promise.all([
     deps.readUsers(),
     deps.readBanks(),
@@ -106,6 +121,19 @@ export async function verifyMigration(
         detail: `read ${scan.scanned} of ${scan.reportedTotal} documents across ${scan.pages} page(s)`,
       });
     }
+  }
+
+  // A record the mapper refused to migrate is a record that is NOT in
+  // PostgreSQL. Counting it and then reporting "No drift" told the operator the
+  // two stores matched when a customer's account had in fact been dropped —
+  // duplicate auth ids and duplicate account links both land here.
+  for (const skip of expected.skipped) {
+    if (acknowledged.has(skip.code)) continue;
+    drift.push({
+      category: "unmigrated-source-record",
+      id: `${skip.kind} ${skip.id}`,
+      detail: `[${skip.code}] ${skip.reason}`,
+    });
   }
 
   // --- customers ----------------------------------------------------------

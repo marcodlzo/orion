@@ -4,7 +4,7 @@ import "server-only";
 import type { PoolClient } from "pg";
 
 import { query } from "../pool";
-import { toDatabaseError } from "../errors";
+import { IdentityConflictError, toDatabaseError } from "../errors";
 
 export type LinkedAccountRow = {
   id: string;
@@ -134,6 +134,23 @@ export async function upsertLinkedAccount(
   );
 
   const row = rows[0];
+
+  // COALESCE above protects a recorded bridge from being CLEARED by a later run
+  // that lacks one. It does not — and must not — silently swallow a run that
+  // supplies a DIFFERENT one. That would report a successful update while the
+  // stored row still pointed at another legacy document, so the two stores
+  // would disagree about which Appwrite record this account came from.
+  if (
+    input.legacyAppwriteBankDocumentId !== null &&
+    row.legacy_appwrite_bank_document_id !== input.legacyAppwriteBankDocumentId
+  ) {
+    throw new IdentityConflictError({
+      field: `linked_accounts(${input.customerId}, ${input.provider}, ${input.externalAccountId}).legacy_appwrite_bank_document_id`,
+      stored: row.legacy_appwrite_bank_document_id ?? "(none)",
+      incoming: input.legacyAppwriteBankDocumentId,
+    });
+  }
+
   return { row, created: row.inserted };
 }
 

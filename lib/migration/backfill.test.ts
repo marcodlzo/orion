@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { ConstraintViolationError } from "../db/errors";
 import type { TransactionClient } from "../db/pool";
 import type {
   BankingCustomerInput,
@@ -258,7 +259,7 @@ describe("runBackfill — dry run", () => {
     expect(report.dryRun).toBe(true);
   });
 
-  it("does not swallow a genuine failure as if it were the rollback", async () => {
+  it("does not swallow a programming error as if it were the rollback", async () => {
     const db = fakeDatabase();
 
     await expect(
@@ -293,10 +294,16 @@ describe("runBackfill — degraded provider", () => {
       })
     );
 
-    // An expired Plaid Item must not cost the customer their account record.
-    expect(report.accounts.created).toBe(1);
+    // CHANGED: an unverified account is no longer written. Plaid did not
+    // confirm the currency, and `currency` is NOT NULL with a CHECK of 'USD',
+    // so inserting would assert a fact nobody checked. Nothing is lost -- the
+    // link is still in Appwrite and a re-run inserts it once Plaid answers.
+    expect(report.accounts.created).toBe(0);
+    expect(report.accounts.blocked).toBe(1);
     expect(report.enrichment).toEqual({ succeeded: 0, failed: 1 });
-    expect(db.committed.accounts[0].displayName).toBe(FALLBACK_METADATA.displayName);
+    expect(db.committed.accounts).toHaveLength(0);
+    // The customer still migrates.
+    expect(report.customers.created).toBe(1);
   });
 
   it("names every account it could not enrich", async () => {
@@ -319,7 +326,7 @@ describe("runBackfill — degraded provider", () => {
         legacyBankDocumentId: "bank-doc-1",
         code: "PROVIDER_ERROR",
         reason: "provider error: ITEM_LOGIN_REQUIRED",
-        blocked: false,
+        blocked: true,
       },
     ]);
   });
@@ -369,17 +376,25 @@ describe("runBackfill — failures", () => {
       deps({
         ...db.deps,
         upsertAccount: async () => {
-          throw Object.assign(
-            new Error('duplicate key value violates unique constraint — Key (external_account_id)=(plaid-account-1) already exists'),
-            { name: "ConstraintViolationError", code: "23505", constraint: "linked_accounts_customer_id_provider_external_account_id_key" }
+          // A real ConstraintViolationError, as toDatabaseError produces --
+          // not a duck-typed stand-in. The message deliberately quotes the
+          // offending row, the way a driver does.
+          throw new ConstraintViolationError(
+            "duplicate key value violates unique constraint — Key (external_account_id)=(plaid-account-1) already exists",
+            { sqlState: "23505", constraint: "linked_accounts_customer_id_provider_external_account_id_key" }
           );
         },
       })
     );
 
-    expect(report.accounts.failed).toBe(1);
-    const [failure] = report.failures;
-    expect(failure).toMatchObject({ kind: "account", id: "bank-doc-1" });
+    // CHANGED: the first database error now aborts the transaction instead of
+    // being caught and counted. Nothing was committed, so every creation
+    // counter is zero and the single recorded failure is the cause.
+    expect(report.outcome).toBe("rolled-back");
+    expect(report.customers.created).toBe(0);
+    expect(report.accounts.created).toBe(0);
+    const failure = report.failures[report.failures.length - 1];
+    expect(failure.id).toBe("(transaction)");
     // The reason carries the classification, never the driver's message — a
     // constraint error quotes the offending row back at you.
     expect(failure.reason).toBe(
@@ -394,15 +409,22 @@ describe("runBackfill — failures", () => {
       { dryRun: false },
       deps({
         upsertCustomer: async () => {
-          throw new Error("nope");
+          throw new ConstraintViolationError("nope", { sqlState: "23505" });
         },
         upsertAccount,
       })
     );
 
+    // STRONGER than before. Previously the customer failure was caught and the
+    // run limped on to the account loop, which then reported a second,
+    // derivative failure. Now the first database error aborts the transaction
+    // outright, so the account is never attempted and the report says plainly
+    // that nothing was written.
     expect(upsertAccount).not.toHaveBeenCalled();
-    expect(report.accounts.failed).toBe(1);
-    expect(report.failures[1].reason).toContain("was not migrated");
+    expect(report.outcome).toBe("rolled-back");
+    expect(report.customers).toMatchObject({ created: 0, existing: 0 });
+    expect(report.accounts).toMatchObject({ created: 0, updated: 0 });
+    expect(report.failures[report.failures.length - 1].reason).toContain("23505");
   });
 
   it("carries the mapping's skips through to the report", async () => {
@@ -638,7 +660,7 @@ describe("runBackfill — source evidence", () => {
  * Idempotency is not only "the row count did not change". A re-run during a
  * provider outage must not degrade correct data to placeholders.
  */
-describe("runBackfill — degraded enrichment on re-run", () => {
+describe("runBackfill — enrichment must positively verify the account", () => {
   const degraded = {
     ok: false as const,
     code: "PROVIDER_ERROR" as const,
@@ -648,7 +670,22 @@ describe("runBackfill — degraded enrichment on re-run", () => {
     currency: null,
   };
 
-  it("tells the repository the metadata is not trustworthy", async () => {
+  it("writes no account when the provider did not answer", async () => {
+    const db = fakeDatabase();
+
+    const report = await runBackfill(
+      { dryRun: false },
+      deps({ ...db.deps, enrich: async () => degraded })
+    );
+
+    // `blocking: false` on the outcome is advisory; the backfill blocks every
+    // unverified account regardless. An unreachable Item could be hiding a CAD
+    // account, and there is no such thing as a partially-known currency.
+    expect(db.committed.accounts).toHaveLength(0);
+    expect(report.accounts).toMatchObject({ created: 0, blocked: 1 });
+  });
+
+  it("never hands the repository unverified metadata", async () => {
     const db = fakeDatabase();
 
     await runBackfill(
@@ -656,8 +693,10 @@ describe("runBackfill — degraded enrichment on re-run", () => {
       deps({ ...db.deps, enrich: async () => degraded })
     );
 
-    // metadataKnown false is what stops the repository overwriting good values.
-    expect(db.committed.accounts[0].metadataKnown).toBe(false);
+    // The repository still supports metadataKnown=false as defence in depth,
+    // but the backfill no longer reaches it: an unverified account is not
+    // written at all.
+    expect(db.committed.accounts.every((a) => a.metadataKnown)).toBe(true);
   });
 
   it("marks metadata trustworthy when the provider answered", async () => {
@@ -668,24 +707,27 @@ describe("runBackfill — degraded enrichment on re-run", () => {
     expect(db.committed.accounts[0].metadataKnown).toBe(true);
   });
 
-  it("still migrates the account", async () => {
+  it("still migrates the customer that owned the blocked account", async () => {
     const report = await runBackfill(
       { dryRun: false },
       deps({ enrich: async () => degraded })
     );
 
-    // An expired Plaid Item must not cost the customer their account record.
-    expect(report.accounts.created).toBe(1);
-    expect(report.accounts.blocked).toBe(0);
+    expect(report.customers.created).toBe(1);
+  });
+
+  it("inserts the account on a later run once the provider answers", async () => {
+    const db = fakeDatabase();
+
+    await runBackfill({ dryRun: false }, deps({ ...db.deps, enrich: async () => degraded }));
+    expect(db.committed.accounts).toHaveLength(0);
+
+    const recovered = await runBackfill({ dryRun: false }, deps({ ...db.deps }));
+
+    expect(recovered.accounts.created).toBe(1);
   });
 });
 
-/**
- * BLOCKING ENRICHMENT FAILURES.
- *
- * Some failures must not produce a row at all, because writing one would mean
- * inventing a fact.
- */
 describe("runBackfill — blocked accounts", () => {
   const blocking = (code: "AMBIGUOUS_PROVIDER_ACCOUNT" | "UNSUPPORTED_CURRENCY") => ({
     ok: false as const,
@@ -829,12 +871,10 @@ describe("runBackfill — secret containment", () => {
         readBanks: async () => scan([taintedBank()]),
         upsertAccount: async () => {
           // A driver error quotes the offending row and the connection string.
-          throw Object.assign(
-            new Error(
-              `insert failed for row (access_token=${ACCESS_TOKEN}) on ` +
-                `postgresql://orion:${DB_PASSWORD}@localhost:5432/orion`
-            ),
-            { name: "ConstraintViolationError", code: "23505", constraint: "some_key" }
+          throw new ConstraintViolationError(
+            `insert failed for row (access_token=${ACCESS_TOKEN}) on ` +
+              `postgresql://orion:${DB_PASSWORD}@localhost:5432/orion`,
+            { sqlState: "23505", constraint: "some_key" }
           );
         },
       })
@@ -876,5 +916,163 @@ describe("runBackfill — secret containment", () => {
     );
 
     assertClean(report, "incomplete-scan report");
+  });
+});
+
+/**
+ * REFUSAL ON AN INCOMPLETE SOURCE READ.
+ *
+ * The defect this replaces: `complete: false` was recorded in the report and
+ * the run carried on writing, with the CLI exiting non-zero only afterwards.
+ * By then the inconsistent rows were durable. A source deletion mid-pagination
+ * could therefore commit a target that no source ever matched.
+ */
+describe("runBackfill — refuses an incomplete source read", () => {
+  const shortRead = async () => scan([bank()], { reportedTotal: 40, complete: false });
+
+  it("writes nothing and opens no transaction", async () => {
+    const db = fakeDatabase();
+    let transactionsOpened = 0;
+    const runInTransaction = <T,>(fn: (c: TransactionClient) => Promise<T>) => {
+      transactionsOpened += 1;
+      return db.deps.runInTransaction(fn);
+    };
+    const upsertCustomer = vi.fn(db.deps.upsertCustomer);
+    const upsertAccount = vi.fn(db.deps.upsertAccount);
+
+    const report = await runBackfill(
+      { dryRun: false },
+      deps({
+        ...db.deps,
+        readBanks: shortRead,
+        runInTransaction,
+        upsertCustomer,
+        upsertAccount,
+      })
+    );
+
+    expect(report.outcome).toBe("refused");
+    expect(transactionsOpened).toBe(0);
+    expect(upsertCustomer).not.toHaveBeenCalled();
+    expect(upsertAccount).not.toHaveBeenCalled();
+    expect(db.committed.customers).toHaveLength(0);
+    expect(db.committed.accounts).toHaveLength(0);
+  });
+
+  it("makes no provider call either", async () => {
+    // Refusal happens before enrichment, so an incomplete read costs nothing
+    // and leaks no access token to Plaid.
+    const enrich = vi.fn(async () => ({
+      ok: true as const,
+      currency: "USD",
+      metadata: FALLBACK_METADATA,
+    }));
+
+    await runBackfill({ dryRun: false }, deps({ readBanks: shortRead, enrich }));
+
+    expect(enrich).not.toHaveBeenCalled();
+  });
+
+  it("refuses a dry run too", async () => {
+    const report = await runBackfill({ dryRun: true }, deps({ readBanks: shortRead }));
+
+    expect(report.outcome).toBe("refused");
+  });
+
+  it("refuses on an incomplete USER scan, not only banks", async () => {
+    const report = await runBackfill(
+      { dryRun: false },
+      deps({ readUsers: async () => scan([user()], { reportedTotal: 9, complete: false }) })
+    );
+
+    expect(report.outcome).toBe("refused");
+  });
+
+  it("says why, with the numbers", async () => {
+    const report = await runBackfill({ dryRun: false }, deps({ readBanks: shortRead }));
+
+    expect(report.refusedBecause).toContain("incomplete");
+    expect(report.refusedBecause).toContain("40");
+  });
+
+  it("still proceeds when both scans are complete", async () => {
+    const report = await runBackfill({ dryRun: false }, deps());
+
+    expect(report.outcome).toBe("committed");
+  });
+
+  it("reports zero counters when refused", async () => {
+    const report = await runBackfill({ dryRun: false }, deps({ readBanks: shortRead }));
+
+    expect(report.customers).toEqual({ created: 0, existing: 0, failed: 0 });
+    expect(report.accounts).toEqual({ created: 0, updated: 0, failed: 0, blocked: 0 });
+  });
+});
+
+/**
+ * HONEST OUTCOMES.
+ *
+ * The report must describe what happened to the DATABASE, not what the run
+ * intended. Counters accumulated before an abort described rows PostgreSQL had
+ * already discarded.
+ */
+describe("runBackfill — outcome reflects the database", () => {
+  it("marks a committed run committed", async () => {
+    const report = await runBackfill({ dryRun: false }, deps());
+    expect(report.outcome).toBe("committed");
+  });
+
+  it("marks a dry run as a dry run, not committed", async () => {
+    const report = await runBackfill({ dryRun: true }, deps());
+    expect(report.outcome).toBe("dry-run");
+    expect(report.customers.created).toBe(1); // a forecast, and labelled as one
+  });
+
+  it("zeroes every creation counter when the transaction aborts", async () => {
+    const db = fakeDatabase();
+    let calls = 0;
+
+    const report = await runBackfill(
+      { dryRun: false },
+      deps({
+        ...db.deps,
+        readUsers: async () =>
+          scan([user({ $id: "u-1", userId: "a-1" }), user({ $id: "u-2", userId: "a-2" })]),
+        readBanks: async () => scan([]),
+        upsertCustomer: async (input, client) => {
+          calls += 1;
+          if (calls === 2) {
+            throw new ConstraintViolationError("boom", { sqlState: "23505" });
+          }
+          return db.deps.upsertCustomer(input, client);
+        },
+      })
+    );
+
+    // The first customer really was written before the abort. PostgreSQL threw
+    // it away, so reporting "1 created" would describe a row that is not there.
+    expect(report.outcome).toBe("rolled-back");
+    expect(report.customers.created).toBe(0);
+    expect(db.committed.customers).toHaveLength(0);
+  });
+
+  it("rethrows a programming error instead of dressing it as an outcome", async () => {
+    // A bug in this file must not exit 1 looking like bad source data.
+    const thrown = await runBackfill(
+      { dryRun: false },
+      deps({
+        upsertCustomer: async () => {
+          throw new TypeError("undefined is not a function");
+        },
+      })
+    ).then(
+      (report) => report,
+      (e: unknown) => e
+    );
+
+    // The transaction helper wraps what the body threw, so the TypeError is the
+    // cause rather than the thrown value itself.
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as { cause?: unknown }).cause).toBeInstanceOf(TypeError);
   });
 });

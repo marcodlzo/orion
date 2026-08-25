@@ -91,9 +91,11 @@ describe("verifyMigration — a matching migration", () => {
     expect(report.postgres).toEqual({ customers: 1, accounts: 1 });
   });
 
-  it("does not count a source record that was never migratable as drift", async () => {
-    // A user document with no auth account cannot be signed into and is not a
-    // customer. Its absence from PostgreSQL is correct, not missing data.
+  it("FAILS when a source record was skipped, rather than reporting no drift", async () => {
+    // The defect this replaces: a skipped record was merely counted, and the
+    // verifier then said "No drift" and exited 0. A duplicate auth id or a
+    // dropped bank link is not a match between the two stores — it is a record
+    // that did not migrate.
     const report = await verifyMigration(
       deps({
         readUsers: async () => scan([user(), user({ $id: "partial", userId: "" })]),
@@ -101,8 +103,43 @@ describe("verifyMigration — a matching migration", () => {
       })
     );
 
-    expect(report.ok).toBe(true);
+    expect(report.ok).toBe(false);
     expect(report.skippedBySource).toBe(1);
+    expect(report.drift).toContainEqual({
+      category: "unmigrated-source-record",
+      id: "user partial",
+      detail: expect.stringContaining("MISSING_AUTH_ID"),
+    });
+  });
+
+  it("passes only once an operator explicitly acknowledges the skip code", async () => {
+    const withPartial = deps({
+      readUsers: async () => scan([user(), user({ $id: "partial", userId: "" })]),
+      readBanks: async () => scan([bank()]),
+    });
+
+    // Acknowledgement is a deliberate, recorded act — not a default. "The
+    // mapper skipped it" and "a human agreed it should be skipped" are
+    // different facts, and only the second justifies a green verification.
+    const acknowledged = await verifyMigration(withPartial, {
+      acknowledgedSkipCodes: ["MISSING_AUTH_ID"],
+    });
+
+    expect(acknowledged.ok).toBe(true);
+    expect(acknowledged.skippedBySource).toBe(1);
+  });
+
+  it("does not let acknowledging one code hide a different one", async () => {
+    const report = await verifyMigration(
+      deps({
+        readUsers: async () => scan([user(), user({ $id: "dupe", userId: "auth-1" })]),
+        readBanks: async () => scan([bank()]),
+      }),
+      { acknowledgedSkipCodes: ["MISSING_AUTH_ID"] }
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.drift.some((d) => d.detail.includes("DUPLICATE_AUTH_ID"))).toBe(true);
   });
 });
 

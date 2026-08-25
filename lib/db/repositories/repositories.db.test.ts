@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 
 import { closePool, withTransaction } from "../pool";
-import { ConstraintViolationError } from "../errors";
+import { ConstraintViolationError, IdentityConflictError } from "../errors";
 import { requireTestDatabase } from "../test-database";
 import {
   countBankingCustomers,
@@ -90,21 +90,50 @@ describe("banking customers", () => {
     expect(await countBankingCustomers()).toBe(3);
   });
 
-  it("refuses to silently repair a conflicting identity mapping", async () => {
+  it("REJECTS a conflicting identity mapping", async () => {
     await upsertBankingCustomer(customer(1));
 
     // Same auth account claiming a different user document. That is a real
     // identity conflict, not something a backfill should resolve on its own.
-    const error = await upsertBankingCustomer({
-      appwriteAuthId: "auth-1",
-      appwriteUserDocumentId: "user-doc-DIFFERENT",
-    }).catch((e: unknown) => e);
+    //
+    // This assertion used to be `.catch(e => e)` followed by
+    // `expect(error).not.toBeNull()` — which a RESOLVED value also satisfies.
+    // The test passed for months while the upsert quietly kept the old
+    // document id and reported success. `rejects` is the whole point.
+    await expect(
+      upsertBankingCustomer({
+        appwriteAuthId: "auth-1",
+        appwriteUserDocumentId: "user-doc-DIFFERENT",
+      })
+    ).rejects.toBeInstanceOf(IdentityConflictError);
 
-    // The conflict path keeps the existing document id rather than rewriting
-    // it, so the stored mapping is unchanged.
     const stored = await findCustomerByAuthId("auth-1");
     expect(stored?.appwrite_user_document_id).toBe("user-doc-1");
-    expect(error).not.toBeNull();
+  });
+
+  it("names both sides of the conflict so an operator can adjudicate", async () => {
+    await upsertBankingCustomer(customer(1));
+
+    const error = (await upsertBankingCustomer({
+      appwriteAuthId: "auth-1",
+      appwriteUserDocumentId: "user-doc-DIFFERENT",
+    }).then(
+      () => null,
+      (e: unknown) => e
+    )) as IdentityConflictError;
+
+    expect(error.stored).toBe("user-doc-1");
+    expect(error.incoming).toBe("user-doc-DIFFERENT");
+  });
+
+  it("accepts an unchanged re-upsert without raising a conflict", async () => {
+    await upsertBankingCustomer(customer(1));
+
+    // The conflict check must not turn ordinary idempotent re-runs into errors.
+    const second = await upsertBankingCustomer(customer(1));
+
+    expect(second.created).toBe(false);
+    expect(second.row.appwrite_user_document_id).toBe("user-doc-1");
   });
 
   it("rejects two auth accounts claiming one user document", async () => {
@@ -363,5 +392,92 @@ describe("linked accounts — metadata preservation", () => {
     // The CHECK is the last line of defence; enrichment refuses non-USD first.
     expect(error).toBeInstanceOf(ConstraintViolationError);
     expect((error as ConstraintViolationError).sqlState).toBe("23514");
+  });
+});
+
+/**
+ * THE LEGACY BRIDGE IS IMMUTABLE.
+ *
+ * COALESCE(existing, excluded) protects a recorded bridge from being CLEARED by
+ * a run that lacks one. It must not silently swallow a run that supplies a
+ * DIFFERENT one: that reported a successful update while the row still pointed
+ * at another Appwrite document, leaving the two stores disagreeing about where
+ * the account came from.
+ */
+describe("linked accounts — immutable legacy bridge", () => {
+  it("REJECTS a second legacy document id for the same natural account", async () => {
+    const { row: c } = await upsertBankingCustomer(customer());
+    await upsertLinkedAccount(account(c.id, { legacyAppwriteBankDocumentId: "bank-a" }));
+
+    await expect(
+      upsertLinkedAccount(account(c.id, { legacyAppwriteBankDocumentId: "bank-b" }))
+    ).rejects.toBeInstanceOf(IdentityConflictError);
+  });
+
+  it("leaves the stored bridge untouched after a rejected conflict", async () => {
+    const { row: c } = await upsertBankingCustomer(customer());
+    const first = await upsertLinkedAccount(
+      account(c.id, { legacyAppwriteBankDocumentId: "bank-a" })
+    );
+
+    await upsertLinkedAccount(
+      account(c.id, { legacyAppwriteBankDocumentId: "bank-b" })
+    ).catch(() => undefined);
+
+    const stored = await findLinkedAccountByLegacyDocumentId("bank-a");
+    expect(stored?.id).toBe(first.row.id);
+    expect(stored?.legacy_appwrite_bank_document_id).toBe("bank-a");
+    expect(await findLinkedAccountByLegacyDocumentId("bank-b")).toBeNull();
+  });
+
+  it("names both sides of the conflict", async () => {
+    const { row: c } = await upsertBankingCustomer(customer());
+    await upsertLinkedAccount(account(c.id, { legacyAppwriteBankDocumentId: "bank-a" }));
+
+    const error = (await upsertLinkedAccount(
+      account(c.id, { legacyAppwriteBankDocumentId: "bank-b" })
+    ).then(
+      () => null,
+      (e: unknown) => e
+    )) as IdentityConflictError;
+
+    expect(error.stored).toBe("bank-a");
+    expect(error.incoming).toBe("bank-b");
+  });
+
+  it("still allows a null legacy id to leave an existing bridge intact", async () => {
+    const { row: c } = await upsertBankingCustomer(customer());
+    await upsertLinkedAccount(account(c.id, { legacyAppwriteBankDocumentId: "bank-a" }));
+
+    // Absent is not conflicting. A later run that simply does not know the
+    // legacy id must not erase the one already recorded, and must not error.
+    const { row } = await upsertLinkedAccount(
+      account(c.id, { legacyAppwriteBankDocumentId: null })
+    );
+
+    expect(row.legacy_appwrite_bank_document_id).toBe("bank-a");
+  });
+
+  it("accepts an unchanged re-upsert without raising a conflict", async () => {
+    const { row: c } = await upsertBankingCustomer(customer());
+    await upsertLinkedAccount(account(c.id));
+
+    const second = await upsertLinkedAccount(account(c.id));
+
+    expect(second.created).toBe(false);
+    expect(second.row.legacy_appwrite_bank_document_id).toBe("bank-doc-1");
+  });
+
+  it("lets a first insert record a bridge where there was none", async () => {
+    const { row: c } = await upsertBankingCustomer(customer());
+    await upsertLinkedAccount(account(c.id, { legacyAppwriteBankDocumentId: null }));
+
+    const { row } = await upsertLinkedAccount(
+      account(c.id, { legacyAppwriteBankDocumentId: "bank-late" })
+    );
+
+    // Filling in an unknown bridge is not a conflict — COALESCE takes the new
+    // value, and the returned row matches what was asked for.
+    expect(row.legacy_appwrite_bank_document_id).toBe("bank-late");
   });
 });

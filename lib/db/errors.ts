@@ -69,6 +69,39 @@ export class ConstraintViolationError extends DatabaseError {
   }
 }
 
+/**
+ * A stored record already claims a different immutable identity.
+ *
+ * NOT a database failure — PostgreSQL accepted the statement. This is the
+ * upsert noticing that resolving the conflict its usual way would quietly
+ * discard a fact: an auth account already bridged to a different user document,
+ * or a linked account already bridged to a different legacy bank document.
+ *
+ * Those bridges are the audit trail between the two stores. Keeping the old
+ * value and reporting success — which is what a plain `ON CONFLICT DO UPDATE`
+ * plus `COALESCE(existing, excluded)` does — means a later run can attach data
+ * using a mapping the database says belongs to something else. Raising here
+ * stops the migration and asks a human, which is the correct response to two
+ * sources disagreeing about who someone is.
+ */
+export class IdentityConflictError extends Error {
+  readonly code = "IDENTITY_CONFLICT";
+  readonly field: string;
+  readonly stored: string;
+  readonly incoming: string;
+
+  constructor(input: { field: string; stored: string; incoming: string }) {
+    super(
+      `${input.field} is already bridged to ${input.stored}; refusing to accept ${input.incoming}`
+    );
+    this.name = "IdentityConflictError";
+    this.field = input.field;
+    this.stored = input.stored;
+    this.incoming = input.incoming;
+    Object.setPrototypeOf(this, IdentityConflictError.prototype);
+  }
+}
+
 /** SQLSTATE classes that mean "the write violated a rule", not "we broke". */
 const CONSTRAINT_SQLSTATES = new Set([
   "23000", // integrity_constraint_violation

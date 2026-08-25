@@ -164,9 +164,12 @@ describe("dry run against real PostgreSQL", () => {
     );
 
     expect(spy).toHaveBeenCalled();
-    expect(report.accounts.failed).toBe(1);
-    // 23503 is foreign_key_violation — raised by PostgreSQL, not by us.
-    expect(report.failures[0].reason).toContain("23503");
+    // The FK genuinely fired during the dry run — proving the insert really
+    // executed — and now aborts the transaction rather than being counted and
+    // stepped over. 23503 is foreign_key_violation, raised by PostgreSQL.
+    expect(report.outcome).toBe("rolled-back");
+    expect(report.accounts.created).toBe(0);
+    expect(report.failures[report.failures.length - 1].reason).toContain("23503");
   });
 
   it("rejects a genuinely duplicate natural key during a dry run", async () => {
@@ -294,29 +297,37 @@ describe("re-run during a provider outage", () => {
     expect(report.enrichmentFailures).toHaveLength(1);
   });
 
-  it("still inserts a new account with placeholders when there is nothing to preserve", async () => {
+  it("inserts NO account when the provider never confirmed it", async () => {
     const report = await runBackfill(
       { dryRun: false },
       realDeps(users, banks, async () => providerDown)
     );
 
     const after = await snapshot();
-    expect(report.accounts.created).toBe(1);
-    expect(after.accounts[0].display_name).toBe(FALLBACK_METADATA.displayName);
+    // CHANGED: a placeholder row asserted a currency nobody verified. The
+    // customer migrates; the account waits for a provider that answers.
+    expect(report.accounts.created).toBe(0);
+    expect(report.accounts.blocked).toBe(1);
+    expect(after.accounts).toHaveLength(0);
+    expect(after.customers).toHaveLength(1);
   });
 
-  it("fills the placeholder in once the provider recovers", async () => {
+  it("inserts the account once the provider recovers", async () => {
     await runBackfill(
       { dryRun: false },
       realDeps(users, banks, async () => providerDown)
     );
-    const degraded = await snapshot();
+    const blocked = await snapshot();
+    expect(blocked.accounts).toHaveLength(0);
+    expect(blocked.customers).toHaveLength(1);
 
-    await runBackfill({ dryRun: false }, realDeps(users, banks));
-    const recovered = await snapshot();
+    const recovered = await runBackfill({ dryRun: false }, realDeps(users, banks));
+    const after = await snapshot();
 
-    expect(recovered.accounts[0].display_name).toBe("Real Name 1");
-    expect(recovered.accounts[0].id).toBe(degraded.accounts[0].id);
+    // The customer keeps its identity across the two runs.
+    expect(recovered.customers).toMatchObject({ created: 0, existing: 1 });
+    expect(after.customers[0].id).toBe(blocked.customers[0].id);
+    expect(after.accounts[0].display_name).toBe("Real Name 1");
   });
 });
 
@@ -336,13 +347,16 @@ describe("a real PostgreSQL failure", () => {
       }
     );
 
-    expect(report.accounts.failed).toBe(1);
-    // 23514 is check_violation.
-    expect(report.failures[0].reason).toContain("23514");
+    // 23514 is check_violation, raised by PostgreSQL.
+    expect(report.outcome).toBe("rolled-back");
+    expect(report.failures[report.failures.length - 1].reason).toContain("23514");
 
     const after = await snapshot();
-    // The whole run is one transaction, so a failed account write takes the
-    // customer with it. Reported state and persisted state agree: nothing.
+    // Reported state and persisted state now genuinely agree: both are zero.
+    // Previously the report claimed creations that COMMIT — executed as a
+    // rollback — had already discarded.
+    expect(report.customers).toMatchObject({ created: 0, existing: 0 });
+    expect(report.accounts).toMatchObject({ created: 0, updated: 0 });
     expect(after.customers).toHaveLength(0);
     expect(after.accounts).toHaveLength(0);
   });
@@ -364,12 +378,15 @@ describe("a real PostgreSQL failure", () => {
       }
     );
 
-    expect(report.accounts.failed).toBe(2);
+    // CHANGED, and this is the point of the fix: the run stops at the FIRST
+    // error, so there is no second statement issued inside a dead transaction
+    // and therefore no 25P02 at all. Previously the report carried a real
+    // 23514 followed by a derivative 25P02 that described nothing but our own
+    // refusal to stop.
     const reasons = report.failures.map((f) => f.reason);
-    // Both failures are the real CHECK violation. A 25P02 here would mean the
-    // code had carried on inside a dead transaction and mislabelled the cause.
+    expect(report.outcome).toBe("rolled-back");
     expect(reasons.filter((r) => r.includes("23514"))).toHaveLength(1);
-    expect(reasons.some((r) => r.includes("25P02"))).toBe(true);
+    expect(reasons.some((r) => r.includes("25P02"))).toBe(false);
 
     const after = await snapshot();
     expect(after.customers).toHaveLength(0);
@@ -385,9 +402,11 @@ describe("a real PostgreSQL failure", () => {
       }
     );
 
-    expect(report.customers.created).toBe(2);
-    // Reported two customers created; persisted none, because the account
-    // failure rolled the whole thing back. Atomic means atomic.
+    // The previous version of this test asserted `created: 2` against zero
+    // persisted rows and called that "atomic". Atomicity was never the problem
+    // — the REPORT was, because it described rows PostgreSQL had thrown away.
+    expect(report.outcome).toBe("rolled-back");
+    expect(report.customers.created).toBe(0);
     expect(await snapshot()).toMatchObject({ customers: [], accounts: [] });
   });
 });
@@ -436,10 +455,25 @@ describe("verification against real PostgreSQL", () => {
   });
 
   it("flags an account still carrying placeholder metadata", async () => {
-    await runBackfill(
-      { dryRun: false },
-      realDeps(users, banks, async () => providerDown)
-    );
+    // The backfill can no longer CREATE such a row — unverified accounts are
+    // blocked. The detector still matters for rows written by an earlier
+    // version of this tool, so it is exercised against a seeded one.
+    await runBackfill({ dryRun: false }, realDeps(users, banks));
+    const [customer] = (await snapshot()).customers;
+
+    await upsertLinkedAccount({
+      customerId: customer.id,
+      legacyAppwriteBankDocumentId: "bank-doc-1",
+      externalAccountId: "plaid-account-1",
+      provider: "plaid",
+      displayName: FALLBACK_METADATA.displayName,
+      officialName: null,
+      mask: null,
+      accountType: null,
+      accountSubtype: null,
+      currency: "USD",
+      metadataKnown: true,
+    });
 
     const report = await verifyMigration(verifyDeps());
 

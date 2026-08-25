@@ -37,7 +37,7 @@ async function main(): Promise<number> {
   // short source read — a run over partial data must not look successful.
   // Skipped and degraded records are reported but do not fail the command:
   // they are expected outcomes an operator decides about.
-  return report.failures.length > 0 || !report.source.complete ? 1 : 0;
+  return report.outcome === "committed" && report.failures.length === 0 ? 0 : 1;
 }
 
 main()
