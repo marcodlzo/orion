@@ -18,6 +18,7 @@
 import { closePool } from "../lib/db/pool";
 import { runBackfill } from "../lib/migration/backfill";
 import {
+  backfillExitCode,
   describeThrown,
   formatBackfillReport,
 } from "../lib/migration/report-format";
@@ -32,6 +33,21 @@ async function main(): Promise<number> {
     .find((a) => a.startsWith("--expect-source="))
     ?.split("=")[1];
 
+  // BINDING IS MANDATORY FOR A COMMIT.
+  //
+  // Optional binding is no binding: the documented command was an UNBOUND
+  // commit, so the standard path could still write a dataset nobody reviewed.
+  // A dry run needs no fingerprint — it produces one — so requiring it here
+  // costs nothing and makes an unreviewed commit impossible.
+  if (commit && !expect) {
+    console.error("Refusing to commit without --expect-source.");
+    console.error("Run `npm run db:backfill` first and pass the digest it prints:");
+    console.error("  npm run db:backfill:commit -- --expect-source=<digest>");
+    return 1;
+  }
+
+  // After the binding check, deliberately: refusing an unbound commit needs no
+  // database, so that path stays testable as a plain subprocess.
   if (!process.env.DATABASE_URL) {
     console.error("DATABASE_URL is not set.");
     return 1;
@@ -47,7 +63,7 @@ async function main(): Promise<number> {
   // short source read — a run over partial data must not look successful.
   // Skipped and degraded records are reported but do not fail the command:
   // they are expected outcomes an operator decides about.
-  return report.outcome === "committed" && report.failures.length === 0 ? 0 : 1;
+  return backfillExitCode(report);
 }
 
 main()

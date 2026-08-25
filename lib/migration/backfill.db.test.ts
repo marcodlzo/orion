@@ -2,8 +2,16 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 import { closePool, query, withTransaction } from "../db/pool";
 import { requireTestDatabase } from "../db/test-database";
+import {
+  DatabaseUnavailableError,
+  IdentityConflictError,
+  TransactionOutcomeUnknownError,
+} from "../db/errors";
 import { upsertBankingCustomer } from "../db/repositories/banking-customers.repository";
-import { upsertLinkedAccount } from "../db/repositories/linked-accounts.repository";
+import {
+  findLinkedAccountByLegacyDocumentId,
+  upsertLinkedAccount,
+} from "../db/repositories/linked-accounts.repository";
 import type {
   LegacyBankDocument,
   LegacyUserDocument,
@@ -13,6 +21,7 @@ import { MIGRATION_LOCK_KEY, runBackfill, type BackfillDeps } from "./backfill";
 import { FALLBACK_METADATA, type EnrichmentOutcome } from "./enrichment";
 import { verifyMigration, type VerifyDeps } from "./verify";
 import {
+  findCustomerByAuthId,
   listBankingCustomers,
 } from "../db/repositories/banking-customers.repository";
 import { listLinkedAccounts } from "../db/repositories/linked-accounts.repository";
@@ -463,7 +472,12 @@ describe("verification against real PostgreSQL", () => {
     // blocked. The detector still matters for rows written by an earlier
     // version of this tool, so it is exercised against a seeded one.
     await runBackfill({ dryRun: false }, realDeps(users, banks));
-    const [customer] = (await snapshot()).customers;
+    // Pinned by document id, not by row order: `customers[0]` could be either
+    // customer, and reusing bank-doc-1 under the wrong one collides with the
+    // unique legacy bridge rather than exercising the placeholder detector.
+    const customer = (await snapshot()).customers.find(
+      (c) => c.appwrite_user_document_id === "user-doc-1"
+    )!;
 
     await upsertLinkedAccount({
       customerId: customer.id,
@@ -602,5 +616,212 @@ describe("source fingerprint against real PostgreSQL", () => {
 
     expect(report.outcome).toBe("committed");
     expect((await snapshot()).customers).toHaveLength(1);
+  });
+});
+
+/**
+ * THE ADVERSARIAL CASES, AGAINST PRODUCTION withTransaction.
+ *
+ * The previous round of these used a fake transaction wrapper whose error
+ * semantics differed from production — which is exactly how a test claiming
+ * "a TypeError still throws" passed while production converted it into a
+ * QueryFailedError and reported it as migration data.
+ */
+describe("transaction semantics, production withTransaction", () => {
+  const users = [user(1)];
+  const banks = [bank(1, 1)];
+
+  it("propagates a programming defect unchanged", async () => {
+    await expect(
+      runBackfill(
+        { dryRun: false },
+        {
+          ...realDeps(users, banks),
+          upsertCustomer: async () => {
+            throw new TypeError("programming defect");
+          },
+        }
+      )
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("does not convert a programming defect into a rolled-back report", async () => {
+    const outcome = await runBackfill(
+      { dryRun: false },
+      {
+        ...realDeps(users, banks),
+        upsertAccount: async () => {
+          throw new TypeError("programming defect");
+        },
+      }
+    ).then(
+      (report) => report.outcome,
+      () => "threw"
+    );
+
+    expect(outcome).toBe("threw");
+    expect(await snapshot()).toMatchObject({ customers: [], accounts: [] });
+  });
+
+  it("still rolls back after a programming defect", async () => {
+    await runBackfill(
+      { dryRun: false },
+      {
+        ...realDeps(users, banks),
+        upsertAccount: async () => {
+          throw new TypeError("programming defect");
+        },
+      }
+    ).catch(() => undefined);
+
+    // The customer write really executed before the throw. PostgreSQL must
+    // still have discarded it.
+    expect((await snapshot()).customers).toHaveLength(0);
+  });
+
+  it("reports an account CHECK violation as an ACCOUNT failure, with its id", async () => {
+    const report = await runBackfill(
+      { dryRun: false },
+      {
+        ...realDeps(users, banks),
+        upsertAccount: async (input, client) =>
+          upsertLinkedAccount({ ...input, currency: "GBP" }, client),
+      }
+    );
+
+    // It used to say `customer (transaction)` for every failure, sending an
+    // operator to look at the wrong record.
+    expect(report.outcome).toBe("rolled-back");
+    expect(report.failures[report.failures.length - 1]).toMatchObject({
+      kind: "account",
+      id: "bank-doc-1",
+    });
+    expect(report.accounts.failed).toBe(1);
+    expect(report.customers.failed).toBe(0);
+  });
+
+  it("reports a customer conflict as a CUSTOMER failure, with its id", async () => {
+    await upsertBankingCustomer({
+      appwriteAuthId: "auth-1",
+      appwriteUserDocumentId: "some-other-document",
+    });
+
+    const report = await runBackfill({ dryRun: false }, realDeps(users, banks));
+
+    expect(report.failures[report.failures.length - 1]).toMatchObject({
+      kind: "customer",
+      id: "user-doc-1",
+    });
+    expect(report.customers.failed).toBe(1);
+    expect(report.accounts.failed).toBe(0);
+  });
+
+  it("classifies an unreachable database as not-started, never as rolled-back", async () => {
+    const report = await runBackfill(
+      { dryRun: false },
+      {
+        ...realDeps(users, banks),
+        runInTransaction: async () => {
+          // Nothing connected, no BEGIN was issued, no rollback occurred.
+          throw new DatabaseUnavailableError("connection refused");
+        },
+      }
+    );
+
+    // Saying "rolled back" would describe an event that never happened.
+    expect(report.outcome).toBe("not-started");
+    expect(report.customers.failed).toBe(0);
+    expect(report.accounts.failed).toBe(0);
+  });
+
+  it("reports an ambiguous COMMIT as unknown, not as a rollback", async () => {
+    const report = await runBackfill(
+      { dryRun: false },
+      {
+        ...realDeps(users, banks),
+        runInTransaction: async () => {
+          // withTransaction raises this when COMMIT itself fails: PostgreSQL
+          // may have applied the transaction and lost the acknowledgement.
+          throw new TransactionOutcomeUnknownError();
+        },
+      }
+    );
+
+    expect(report.outcome).toBe("unknown");
+  });
+});
+
+describe("rejected conflicts are non-destructive", () => {
+  it("leaves every metadata column and updated_at untouched", async () => {
+    const { row: c } = await upsertBankingCustomer({
+      appwriteAuthId: "auth-1",
+      appwriteUserDocumentId: "user-doc-1",
+    });
+
+    const base = {
+      customerId: c.id,
+      externalAccountId: "plaid-account-1",
+      provider: "plaid" as const,
+      currency: "USD",
+      metadataKnown: true,
+    };
+
+    const { row: before } = await upsertLinkedAccount({
+      ...base,
+      legacyAppwriteBankDocumentId: "bank-original",
+      displayName: "Original Name",
+      officialName: "Original Official",
+      mask: "0000",
+      accountType: "depository",
+      accountSubtype: "checking",
+    });
+
+    // NOT inside a transaction: the repository is callable without one, and
+    // "throws" must not mean "throws, having already mutated the row".
+    await expect(
+      upsertLinkedAccount({
+        ...base,
+        legacyAppwriteBankDocumentId: "bank-different",
+        displayName: "MUTATED BY REJECTED WRITE",
+        officialName: "Mutated Official",
+        mask: "9999",
+        accountType: "credit",
+        accountSubtype: "savings",
+      })
+    ).rejects.toBeInstanceOf(IdentityConflictError);
+
+    const after = await findLinkedAccountByLegacyDocumentId("bank-original");
+
+    expect(after).toMatchObject({
+      id: before.id,
+      legacy_appwrite_bank_document_id: "bank-original",
+      display_name: "Original Name",
+      official_name: "Original Official",
+      mask: "0000",
+      account_type: "depository",
+      account_subtype: "checking",
+    });
+    expect(after!.updated_at).toEqual(before.updated_at);
+  });
+
+  it("leaves the customer row untouched on a rejected identity conflict", async () => {
+    const { row: before } = await upsertBankingCustomer({
+      appwriteAuthId: "auth-1",
+      appwriteUserDocumentId: "user-doc-1",
+    });
+
+    await expect(
+      upsertBankingCustomer({
+        appwriteAuthId: "auth-1",
+        appwriteUserDocumentId: "user-doc-DIFFERENT",
+      })
+    ).rejects.toBeInstanceOf(IdentityConflictError);
+
+    const after = await findCustomerByAuthId("auth-1");
+    expect(after).toMatchObject({
+      id: before.id,
+      appwrite_user_document_id: "user-doc-1",
+    });
+    expect(after!.updated_at).toEqual(before.updated_at);
   });
 });

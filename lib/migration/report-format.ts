@@ -50,16 +50,33 @@ export function describeThrown(error: unknown): string {
   return "unknown error";
 }
 
+/**
+ * Process exit code for a finished backfill.
+ *
+ * Extracted so it can be tested. A successful DRY RUN is a success — it used to
+ * exit 1, which made the normal first command always look like a failure and
+ * would have blocked CI on the happy path. Everything that did not durably do
+ * what was asked exits non-zero, including "unknown", which needs a human.
+ */
+export function backfillExitCode(report: BackfillReport): number {
+  const succeeded =
+    (report.outcome === "committed" || report.outcome === "dry-run") &&
+    report.failures.length === 0;
+  return succeeded ? 0 : 1;
+}
+
 export function formatBackfillReport(report: BackfillReport): string[] {
   // The heading states what happened to the DATABASE, not what was requested.
   // "COMMITTED" over counters that PostgreSQL rolled back is a false statement
   // about the system of record.
-  const mode = {
+  const mode: Record<BackfillReport["outcome"], string> = {
     "committed": "COMMITTED",
     "dry-run": "DRY RUN — nothing was written",
-    "rolled-back": "ROLLED BACK — NOTHING WAS WRITTEN",
+    "rolled-back": "ROLLED BACK — nothing was written",
+    "not-started": "NOT STARTED — the transaction never opened",
+    "unknown": "*** OUTCOME UNKNOWN — INSPECT THE DATABASE ***",
     "refused": "REFUSED — nothing was attempted",
-  }[report.outcome];
+  };
   const { users, banks } = report.source;
   const out: string[] = [];
 
@@ -67,7 +84,7 @@ export function formatBackfillReport(report: BackfillReport): string[] {
     `source ${label.padEnd(11)}${s.scanned}/${s.reportedTotal} scanned over ${s.pages} page(s)` +
     (s.complete ? "" : "   *** INCOMPLETE ***");
 
-  out.push(RULE, `Appwrite → PostgreSQL backfill   [${mode}]`, RULE);
+  out.push(RULE, `Appwrite → PostgreSQL backfill   [${mode[report.outcome]}]`, RULE);
   // Source evidence, not just counts: "12 customers migrated" is equally true
   // of a complete read and of one that stopped after the first page.
   out.push(scanLine("users", users), scanLine("banks", banks));
@@ -117,6 +134,19 @@ export function formatBackfillReport(report: BackfillReport): string[] {
   if (report.outcome === "rolled-back") {
     out.push(
       "The transaction aborted. PostgreSQL discarded every write, so the counters above are all zero."
+    );
+  }
+  if (report.outcome === "not-started") {
+    out.push(
+      "The transaction never opened, so nothing was attempted. This is not the same as a rollback."
+    );
+  }
+  if (report.outcome === "unknown") {
+    out.push(
+      "COMMIT FAILED. PostgreSQL may or may not have applied this transaction —",
+      "the acknowledgement was lost, and a later ROLLBACK cannot undo a commit",
+      "that already happened. DO NOT re-run blindly. Inspect the database first;",
+      "the upserts are idempotent, so a re-run is safe once you know the state."
     );
   }
   if (!report.source.complete) {

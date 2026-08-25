@@ -42,8 +42,20 @@ export type Drift = {
  * be skipped". Passing a code here records the second.
  */
 export type VerifyOptions = {
-  acknowledgedSkipCodes?: readonly SkipCode[];
+  /**
+   * Specific records an operator has reviewed, as `CODE:sourceId`.
+   *
+   * Per RECORD, not per code. Acknowledging a code alone silently absolved
+   * every future record that happened to share it: a run approved for one
+   * partial signup would keep passing as new ones appeared, which is the
+   * opposite of review.
+   */
+  acknowledged?: readonly string[];
 };
+
+/** The token an operator passes to acknowledge one reviewed record. */
+export const acknowledgementToken = (code: SkipCode, id: string): string =>
+  `${code}:${id}`;
 
 export type VerificationReport = {
   checkedAt: string;
@@ -115,7 +127,7 @@ export async function verifyMigration(
   deps: VerifyDeps = defaultVerifyDeps,
   options: VerifyOptions = {}
 ): Promise<VerificationReport> {
-  const acknowledged = new Set<SkipCode>(options.acknowledgedSkipCodes ?? []);
+  const acknowledged = new Set<string>(options.acknowledged ?? []);
   const [userScan, bankScan, pgCustomers, pgAccounts] = await Promise.all([
     deps.readUsers(),
     deps.readBanks(),
@@ -149,11 +161,11 @@ export async function verifyMigration(
   // two stores matched when a customer's account had in fact been dropped —
   // duplicate auth ids and duplicate account links both land here.
   for (const skip of expected.skipped) {
-    if (acknowledged.has(skip.code)) continue;
+    if (acknowledged.has(acknowledgementToken(skip.code, skip.id))) continue;
     drift.push({
       category: "unmigrated-source-record",
       id: `${skip.kind} ${skip.id}`,
-      detail: `[${skip.code}] ${skip.reason}`,
+      detail: `[${skip.code}] ${skip.reason} — acknowledge with ${acknowledgementToken(skip.code, skip.id)}`,
     });
   }
 

@@ -9,14 +9,16 @@ vi.mock("../appwrite", () => ({
 import { InfrastructureError } from "../auth/errors";
 import { PAGE_SIZE, readAllLegacyUsers } from "./appwrite-source";
 
-const docs = (from: number, count: number) =>
+const docs = (from: number, count: number, updatedAt = "2026-01-01T00:00:00.000Z") =>
   Array.from({ length: count }, (_, i) => ({
     $id: `user-${String(from + i).padStart(5, "0")}`,
     userId: `auth-${from + i}`,
+    // Required by the fingerprint: without it an in-place edit is invisible.
+    $updatedAt: updatedAt,
   }));
 
 /** A server that pages correctly through `all`. */
-const pagingServer = (all: { $id: string }[]) =>
+const pagingServer = (all: Record<string, unknown>[]) =>
   vi.fn(async (_db: string, _coll: string, queries: unknown[]) => {
     const cursor = findCursor(queries);
     const start = cursor ? all.findIndex((d) => d.$id === cursor) + 1 : 0;
@@ -211,5 +213,83 @@ describe("readAll — error containment", () => {
     );
 
     expect(error!.message).not.toContain("SENTINEL_APPWRITE_KEY_9f3a");
+  });
+});
+
+/**
+ * THE FINGERPRINT.
+ *
+ * A digest over ids alone cannot see an in-place edit, and counts cannot see a
+ * delete plus an insert. Both are exactly what a dry run must be able to detect
+ * before its approval is applied.
+ */
+describe("readAll — source fingerprint", () => {
+  it("changes when a document is edited in place, with the count unchanged", async () => {
+    listDocuments.mockImplementation(pagingServer(docs(1, 3)));
+    const before = (await readAllLegacyUsers()).fingerprint;
+
+    // Same ids, same count, one newer $updatedAt.
+    const edited = docs(1, 3);
+    edited[1].$updatedAt = "2026-06-30T12:00:00.000Z";
+    listDocuments.mockImplementation(pagingServer(edited));
+    const after = (await readAllLegacyUsers()).fingerprint;
+
+    expect(after).not.toBe(before);
+  });
+
+  it("changes when one document is swapped for another, with the count unchanged", async () => {
+    listDocuments.mockImplementation(pagingServer(docs(1, 3)));
+    const before = (await readAllLegacyUsers()).fingerprint;
+
+    const swapped = [...docs(1, 2), ...docs(99, 1)];
+    listDocuments.mockImplementation(pagingServer(swapped));
+    const after = (await readAllLegacyUsers()).fingerprint;
+
+    expect(after).not.toBe(before);
+  });
+
+  it("is stable across identical reads", async () => {
+    listDocuments.mockImplementation(pagingServer(docs(1, 5)));
+
+    const first = (await readAllLegacyUsers()).fingerprint;
+    const second = (await readAllLegacyUsers()).fingerprint;
+
+    expect(second).toBe(first);
+  });
+
+  it("cannot be forged by field contents containing the delimiter", async () => {
+    listDocuments.mockImplementation(
+      pagingServer([
+        { $id: "a:1|b", userId: "x", $updatedAt: "2026-01-01T00:00:00.000Z" },
+      ])
+    );
+    const a = (await readAllLegacyUsers()).fingerprint;
+
+    listDocuments.mockImplementation(
+      pagingServer([
+        { $id: "a", userId: "x", $updatedAt: "1|b|2026-01-01T00:00:00.000Z" },
+      ])
+    );
+    const b = (await readAllLegacyUsers()).fingerprint;
+
+    // Length-prefixed encoding, so no separator can be synthesised from data.
+    expect(a).not.toBe(b);
+  });
+
+  it("REFUSES to fingerprint a document with no $updatedAt", async () => {
+    // Without it the digest silently proves less than it appears to.
+    listDocuments.mockImplementation(
+      pagingServer([{ $id: "no-timestamp", userId: "x" }])
+    );
+
+    await expect(readAllLegacyUsers()).rejects.toBeInstanceOf(InfrastructureError);
+  });
+
+  it("refuses a malformed $updatedAt too", async () => {
+    listDocuments.mockImplementation(
+      pagingServer([{ $id: "bad", userId: "x", $updatedAt: "" }])
+    );
+
+    await expect(readAllLegacyUsers()).rejects.toBeInstanceOf(InfrastructureError);
   });
 });

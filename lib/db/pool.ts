@@ -7,7 +7,11 @@ import "server-only";
 
 import { Pool, type PoolClient, type QueryResultRow } from "pg";
 
-import { DatabaseUnavailableError, toDatabaseError } from "./errors";
+import {
+  DatabaseUnavailableError,
+  TransactionOutcomeUnknownError,
+  toDatabaseError,
+} from "./errors";
 
 /**
  * A connection enlisted in an open transaction.
@@ -100,21 +104,48 @@ export async function withTransaction<T>(
   fn: (client: PoolClient) => Promise<T>
 ): Promise<T> {
   const client = await getPool().connect().catch((error) => {
+    // Never started. No BEGIN was issued and nothing can have been written.
     throw toDatabaseError(error);
   });
 
   try {
-    await client.query("BEGIN");
-    const result = await fn(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (error) {
     try {
-      await client.query("ROLLBACK");
-    } catch {
-      // The connection is already broken; the original error is what matters.
+      await client.query("BEGIN");
+    } catch (error) {
+      throw toDatabaseError(error);
     }
-    throw toDatabaseError(error);
+
+    let result: T;
+    try {
+      result = await fn(client);
+    } catch (callbackError) {
+      await client.query("ROLLBACK").catch(() => {
+        // The connection is already broken. PostgreSQL rolls back a severed
+        // session on its own, so the transaction is still undone.
+      });
+      // RETHROWN UNCHANGED, deliberately.
+      //
+      // This used to be `throw toDatabaseError(error)`, which turned a
+      // TypeError from the callback into a QueryFailedError. Callers that
+      // branch on "is this a database failure?" then treated a programming
+      // defect as an expected migration outcome and reported it as data.
+      // Only errors from BEGIN/COMMIT/connect are this layer's to classify.
+      throw callbackError;
+    }
+
+    try {
+      await client.query("COMMIT");
+    } catch (error) {
+      // THE DURABLE OUTCOME IS UNKNOWN.
+      //
+      // A failed COMMIT does not mean "not committed". PostgreSQL may have
+      // committed and the acknowledgement been lost on the way back. Rolling
+      // back afterwards cannot undo it, and claiming "nothing was written"
+      // would be a statement nobody is in a position to make.
+      throw new TransactionOutcomeUnknownError({ cause: error });
+    }
+
+    return result;
   } finally {
     client.release();
   }

@@ -117,6 +117,9 @@ export async function upsertLinkedAccount(
            legacy_appwrite_bank_document_id =
              COALESCE(linked_accounts.legacy_appwrite_bank_document_id,
                       EXCLUDED.legacy_appwrite_bank_document_id)
+       WHERE linked_accounts.legacy_appwrite_bank_document_id IS NULL
+          OR $2::text IS NULL
+          OR linked_accounts.legacy_appwrite_bank_document_id = $2::text
      RETURNING *, (xmax = 0) AS inserted`,
     [
       input.customerId,
@@ -133,21 +136,27 @@ export async function upsertLinkedAccount(
     ]
   );
 
+  // The WHERE on the conflict path means an incompatible bridge UPDATES NO ROW
+  // and returns nothing. That ordering matters: the check used to run after the
+  // SET had already landed, so a rejected write still overwrote display_name,
+  // mask, subtype and updated_at before throwing. Inside the backfill's
+  // transaction that was rolled back, but the repository is also callable
+  // without one, and "throws" must not mean "throws, having mutated the row".
   const row = rows[0];
 
-  // COALESCE above protects a recorded bridge from being CLEARED by a later run
-  // that lacks one. It does not — and must not — silently swallow a run that
-  // supplies a DIFFERENT one. That would report a successful update while the
-  // stored row still pointed at another legacy document, so the two stores
-  // would disagree about which Appwrite record this account came from.
-  if (
-    input.legacyAppwriteBankDocumentId !== null &&
-    row.legacy_appwrite_bank_document_id !== input.legacyAppwriteBankDocumentId
-  ) {
+  if (!row) {
+    const existing = await run<LinkedAccountRow>(
+      client,
+      `SELECT * FROM linked_accounts
+        WHERE customer_id = $1 AND provider = $2 AND external_account_id = $3`,
+      [input.customerId, input.provider, input.externalAccountId]
+    );
+    const stored = existing.rows[0];
+
     throw new IdentityConflictError({
       field: `linked_accounts(${input.customerId}, ${input.provider}, ${input.externalAccountId}).legacy_appwrite_bank_document_id`,
-      stored: row.legacy_appwrite_bank_document_id ?? "(none)",
-      incoming: input.legacyAppwriteBankDocumentId,
+      stored: stored?.legacy_appwrite_bank_document_id ?? "(unknown)",
+      incoming: input.legacyAppwriteBankDocumentId ?? "(none)",
     });
   }
 

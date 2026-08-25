@@ -102,6 +102,32 @@ export class IdentityConflictError extends Error {
   }
 }
 
+/**
+ * COMMIT failed, so whether the transaction is durable is UNKNOWN.
+ *
+ * Not a synonym for "rolled back". PostgreSQL may have committed successfully
+ * and the acknowledgement been lost on the network; from the client's side the
+ * two are indistinguishable. A later ROLLBACK cannot undo a commit that already
+ * happened.
+ *
+ * The only honest response is to say the outcome is unknown and require an
+ * operator to look. Reporting "nothing was written" here would be asserting
+ * something nobody can know.
+ */
+export class TransactionOutcomeUnknownError extends Error {
+  readonly code = "TRANSACTION_OUTCOME_UNKNOWN";
+
+  constructor(options?: { cause?: unknown }) {
+    super(
+      "COMMIT failed; whether the transaction was durably applied is unknown. " +
+        "Inspect the database before re-running."
+    );
+    this.name = "TransactionOutcomeUnknownError";
+    if (options?.cause !== undefined) this.cause = options.cause;
+    Object.setPrototypeOf(this, TransactionOutcomeUnknownError.prototype);
+  }
+}
+
 /** SQLSTATE classes that mean "the write violated a rule", not "we broke". */
 const CONSTRAINT_SQLSTATES = new Set([
   "23000", // integrity_constraint_violation

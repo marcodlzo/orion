@@ -2,7 +2,11 @@
 import "server-only";
 
 import { withTransaction, type TransactionClient } from "../db/pool";
-import { DatabaseError, IdentityConflictError } from "../db/errors";
+import {
+  DatabaseError,
+  IdentityConflictError,
+  TransactionOutcomeUnknownError,
+} from "../db/errors";
 import { upsertBankingCustomer } from "../db/repositories/banking-customers.repository";
 import { upsertLinkedAccount } from "../db/repositories/linked-accounts.repository";
 import {
@@ -61,8 +65,15 @@ export type BackfillOutcome =
   | "committed"
   /** Writes executed, then were deliberately undone. Counters are a forecast. */
   | "dry-run"
-  /** A failure aborted the transaction. NOTHING was written; counters are zero. */
+  /** A failure aborted the transaction and PostgreSQL rolled it back. */
   | "rolled-back"
+  /** The transaction never started (no connection, or BEGIN failed). */
+  | "not-started"
+  /**
+   * COMMIT failed. Whether the writes are durable is UNKNOWN and cannot be
+   * determined from here — inspect the database before re-running.
+   */
+  | "unknown"
   /** Refused before any provider call or write. Nothing happened at all. */
   | "refused";
 
@@ -310,7 +321,15 @@ export async function runBackfill(
   };
 
   // ---- phase 3: one transaction, no network ------------------------------
+  //
+  // Which record is mid-flight, so a failure can name it. Without this the
+  // report said "customer (transaction)" for every failure, including a
+  // linked-account CHECK violation.
+  let current: { kind: "customer" | "account"; id: string } | null = null;
+  let started = false;
+
   const work = async (client: TransactionClient) => {
+    started = true;
     // FIRST statement in the transaction. Held until commit or rollback, so a
     // concurrent backfill waits here instead of racing into a unique-violation
     // on an index the ON CONFLICT arbiter does not cover.
@@ -331,6 +350,7 @@ export async function runBackfill(
     // The first error now propagates, withTransaction rolls back, and the
     // caller rebuilds the report from what is actually true: nothing.
     for (const customer of plan.customers) {
+      current = { kind: "customer", id: customer.appwriteUserDocumentId };
       const { row, created } = await deps.upsertCustomer(customer, client);
       customerIds.set(customer.appwriteUserDocumentId, row.id);
       if (created) report.customers.created += 1;
@@ -338,6 +358,7 @@ export async function runBackfill(
     }
 
     for (const { account, metadata, currency, metadataKnown } of enriched) {
+      current = { kind: "account", id: account.legacyAppwriteBankDocumentId };
       const customerId = customerIds.get(account.ownerUserDocumentId);
       if (!customerId) {
         // Not a database error — the mapper already decided this owner is not
@@ -371,6 +392,7 @@ export async function runBackfill(
       else report.accounts.updated += 1;
     }
 
+    current = null;
     report.finishedAt = new Date().toISOString();
 
     if (options.dryRun) {
@@ -386,26 +408,68 @@ export async function runBackfill(
     const rollback = findDryRunRollback(error);
     if (rollback) return rollback.report;
 
+    // A COMMIT that failed leaves the durable outcome genuinely unknown. Saying
+    // "rolled back" here would assert something nobody can know.
+    if (error instanceof TransactionOutcomeUnknownError) {
+      return failedReport("unknown", error, current);
+    }
+
+    // Reached the database but never opened the transaction: no connection, or
+    // BEGIN itself failed. Nothing was written because nothing was attempted —
+    // which is a different fact from "we wrote and undid it".
+    if (!started) {
+      return failedReport("not-started", error, current);
+    }
+
     // Only EXPECTED failure modes become a report. A DatabaseError or an
     // IdentityConflictError means the migration hit something real and the
     // transaction rolled back; anything else — a TypeError, a bug in this file
     // — must keep propagating rather than being dressed up as a migration
     // outcome, or a programming error would exit 1 looking like bad data.
+    //
+    // withTransaction now rethrows the callback's error UNCHANGED, so this
+    // check sees what was actually thrown. It previously saw a QueryFailedError
+    // that the transaction helper had wrapped around a TypeError.
     if (!isExpectedFailure(error)) throw error;
 
-    // The transaction aborted. PostgreSQL discarded every write, so the only
-    // honest report is one that says so: zero creations, zero updates, and the
-    // single failure that caused it. Returning the counters accumulated before
-    // the abort would describe a database state that does not exist.
+    return failedReport("rolled-back", error, current);
+  }
+
+  /**
+   * A report describing a run that wrote nothing durable.
+   *
+   * The failure names the operation that actually failed. Hardcoding
+   * `kind: "customer"` and `id: "(transaction)"` told an operator to go looking
+   * at the wrong record — a linked-account CHECK violation was reported as a
+   * customer failure with no usable identifier.
+   */
+  function failedReport(
+    outcome: BackfillOutcome,
+    error: unknown,
+    operation: { kind: "customer" | "account"; id: string } | null
+  ): BackfillReport {
     return {
       ...report,
-      outcome: "rolled-back",
+      outcome,
       finishedAt: new Date().toISOString(),
-      customers: { created: 0, existing: 0, failed: report.customers.failed + 1 },
-      accounts: { created: 0, updated: 0, failed: report.accounts.failed, blocked },
+      customers: {
+        created: 0,
+        existing: 0,
+        failed: operation?.kind === "customer" ? 1 : 0,
+      },
+      accounts: {
+        created: 0,
+        updated: 0,
+        failed: operation?.kind === "account" ? 1 : report.accounts.failed,
+        blocked,
+      },
       failures: [
         ...report.failures,
-        { kind: "customer", id: "(transaction)", reason: describe(error) },
+        {
+          kind: operation?.kind ?? "customer",
+          id: operation?.id ?? "(transaction)",
+          reason: describe(error),
+        },
       ],
     };
   }

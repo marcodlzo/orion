@@ -152,9 +152,12 @@ function resolveRuntimeImports(code: string, rel: string): string[] {
   //   import "./x"        side effect — runs the module for its top level alone
   //   import("./x")       dynamic — runs it later, but still runs it
   //   require("./x")      CommonJS — the form tsx actually emits
-  const SIDE_EFFECT = /(?:^|[\n;])\s*import\s+["']([^"']+)["']/g;
-  const DYNAMIC = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
-  const REQUIRE = /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g;
+  //
+  // Backticks are accepted everywhere a quote is. A template-literal specifier
+  // executes identically and was the last syntactic way past this guard.
+  const SIDE_EFFECT = /(?:^|[\n;])\s*import\s+["'`]([^"'`]+)["'`]/g;
+  const DYNAMIC = /\bimport\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
+  const REQUIRE = /\brequire\s*\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
 
   for (const re of [SIDE_EFFECT, DYNAMIC, REQUIRE]) {
     while ((m = re.exec(code)) !== null) specifiers.push(m[1]);
@@ -211,6 +214,18 @@ describe("resolveRuntimeImports", () => {
 
   it("sees a CommonJS require", () => {
     const code = 'const m = require("../migration/appwrite-source");';
+    expect(resolveRuntimeImports(code, FROM)).toContain(TARGET);
+  });
+
+  it("sees a TEMPLATE-LITERAL dynamic import", () => {
+    // The last syntactic way past this guard. It executes identically to the
+    // quoted form.
+    const code = "const m = await import(`../migration/appwrite-source`);";
+    expect(resolveRuntimeImports(code, FROM)).toContain(TARGET);
+  });
+
+  it("sees a template-literal require", () => {
+    const code = "const m = require(`../migration/appwrite-source`);";
     expect(resolveRuntimeImports(code, FROM)).toContain(TARGET);
   });
 

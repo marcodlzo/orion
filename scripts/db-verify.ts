@@ -15,7 +15,6 @@ import {
   describeThrown,
   formatVerificationReport,
 } from "../lib/migration/report-format";
-import type { SkipCode } from "../lib/migration/mapping";
 import { defaultVerifyDeps, verifyMigration } from "../lib/migration/verify";
 
 async function main(): Promise<number> {
@@ -30,14 +29,14 @@ async function main(): Promise<number> {
   const acknowledged = process.argv
     .filter((a) => a.startsWith("--acknowledge="))
     .map((a) => a.split("=")[1])
-    .filter(Boolean) as SkipCode[];
+    .filter(Boolean);
 
   const report = await verifyMigration(defaultVerifyDeps, {
-    acknowledgedSkipCodes: acknowledged,
+    acknowledged,
   });
 
   if (acknowledged.length) {
-    console.log(`Acknowledged skip codes: ${acknowledged.join(", ")}`);
+    console.log(`Acknowledged records: ${acknowledged.join(", ")}`);
   }
   for (const line of formatVerificationReport(report)) console.log(line);
   return report.ok ? 0 : 1;

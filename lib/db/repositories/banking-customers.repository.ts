@@ -69,16 +69,25 @@ export async function upsertBankingCustomer(
      VALUES ($1, $2)
      ON CONFLICT (appwrite_auth_id) DO UPDATE
        SET appwrite_auth_id = EXCLUDED.appwrite_auth_id
+       WHERE banking_customers.appwrite_user_document_id
+             = EXCLUDED.appwrite_user_document_id
      RETURNING *, (xmax = 0) AS inserted`,
     [input.appwriteAuthId, input.appwriteUserDocumentId]
   );
 
+  // A mismatched document id now updates NO row and returns nothing, so the
+  // conflict is detected without the statement having touched the record.
   const row = rows[0];
 
-  if (row.appwrite_user_document_id !== input.appwriteUserDocumentId) {
+  if (!row) {
+    const existing = await run<BankingCustomerRow>(
+      client,
+      "SELECT * FROM banking_customers WHERE appwrite_auth_id = $1",
+      [input.appwriteAuthId]
+    );
     throw new IdentityConflictError({
       field: `banking_customers.appwrite_auth_id=${input.appwriteAuthId}`,
-      stored: row.appwrite_user_document_id,
+      stored: existing.rows[0]?.appwrite_user_document_id ?? "(unknown)",
       incoming: input.appwriteUserDocumentId,
     });
   }

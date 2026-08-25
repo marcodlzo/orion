@@ -239,15 +239,21 @@ reaches neither Plaid nor PostgreSQL.
 
 | Code | Blocking? | Meaning |
 |---|---|---|
-| `PROVIDER_ERROR` | no | Plaid unreachable or the Item needs re-auth. Migrates with placeholder metadata; a re-run fills it in. |
-| `NO_ACCESS_TOKEN` | no | The legacy record has no token. The link is still real data. |
-| `SOURCE_ACCOUNT_NOT_FOUND` | no | The account is not on the Item any more. Migrates degraded; `db:verify` keeps flagging it. |
+| `PROVIDER_ERROR` | **yes** | Plaid unreachable or the Item needs re-auth. |
+| `NO_ACCESS_TOKEN` | **yes** | The legacy record has no token, so nothing can be confirmed. |
+| `SOURCE_ACCOUNT_NOT_FOUND` | **yes** | The account is not on the Item any more. |
 | `AMBIGUOUS_PROVIDER_ACCOUNT` | **yes** | Two Plaid accounts share the id. Picking one would be a guess. |
 | `UNSUPPORTED_CURRENCY` | **yes** | Not USD. Writing `'USD'` to satisfy the CHECK would record a false fact. |
 
-Non-blocking failures still migrate the row — the link is real data and must not
-be lost because a provider was unavailable. Blocking failures write no row at
-all, because writing one would require inventing something.
+**Every** enrichment failure blocks the account. `currency` is `NOT NULL` with a
+`CHECK` of `'USD'`, so writing a row the provider did not confirm asserts a fact
+nobody checked — an unreachable Item could be hiding a CAD account.
+
+Nothing is lost: the link still exists in Appwrite, the **customer still
+migrates**, and a re-run inserts the account once the provider answers. An
+earlier version of this document said non-blocking failures migrated a
+placeholder row; that is no longer true, and was the defect that made it
+untrue-in-the-safe-direction.
 
 **Currency comes from the provider**, never assumed. It is read from the
 account's `iso_currency_code` (falling back to `unofficial_currency_code`).
@@ -390,7 +396,7 @@ report every missed record as a PostgreSQL orphan.
 | Claim | Evidence |
 |---|---|
 | **idempotent** | Real-PostgreSQL re-runs asserting stable `id`, stable `created_at`, no duplicate rows, and preserved metadata — not merely that `ON CONFLICT` is present. `backfill.db.test.ts`, `repositories.db.test.ts`. |
-| **atomic** | A real CHECK violation mid-run leaves *zero* rows, including customers written before the failure; and a second statement after the abort reports `25P02` rather than continuing. `backfill.db.test.ts` → "a real PostgreSQL failure". |
+| **atomic** | A real CHECK violation mid-run leaves *zero* rows, including customers written before the failure, and the run stops at the first error rather than issuing further statements inside an aborted transaction — so no `25P02` appears at all. `backfill.db.test.ts` → "a real PostgreSQL failure". |
 | **dry-run equivalent** | Dry run and commit call the *same* repository functions in the *same* transaction; only the ending differs. Proven by running both from the same initial state against real PostgreSQL and comparing every counter, plus a foreign-key violation that fires *during* the dry run. |
 | **no secret leakage** | Unique sentinel values for access token, funding-source URL, processor token and DB password, asserted absent from stored rows, reports, error messages, error stacks and JSON across success, provider failure, DB failure, dry run and verification. The absence of an `access_token` column is *not* treated as proof. |
 | **migration complete** | `scanned` vs `reportedTotal` vs `pages` for both collections, with a short read throwing and a non-advancing cursor throwing. Multi-page reads are tested, including the exact-multiple boundary. |

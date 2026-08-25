@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { BackfillReport } from "./backfill";
 import {
+  backfillExitCode,
   describeThrown,
   formatBackfillReport,
   formatVerificationReport,
@@ -439,5 +440,66 @@ describe("operator output — stdout and stderr", () => {
     } finally {
       cap.restore();
     }
+  });
+});
+
+describe("backfillExitCode", () => {
+  const report = (over: Partial<BackfillReport>) => backfillReport(over);
+
+  it("treats a successful DRY RUN as success", () => {
+    // It used to exit 1, so the recommended first command always looked like a
+    // failure and would have blocked CI on the happy path.
+    expect(backfillExitCode(report({ dryRun: true, outcome: "dry-run" }))).toBe(0);
+  });
+
+  it("treats a clean commit as success", () => {
+    expect(backfillExitCode(report({ outcome: "committed" }))).toBe(0);
+  });
+
+  it("fails a rolled-back run", () => {
+    expect(backfillExitCode(report({ outcome: "rolled-back" }))).toBe(1);
+  });
+
+  it("fails a refused run", () => {
+    expect(backfillExitCode(report({ outcome: "refused" }))).toBe(1);
+  });
+
+  it("fails a run that never started", () => {
+    expect(backfillExitCode(report({ outcome: "not-started" }))).toBe(1);
+  });
+
+  it("fails an UNKNOWN outcome, which needs a human", () => {
+    expect(backfillExitCode(report({ outcome: "unknown" }))).toBe(1);
+  });
+
+  it("fails a committed run that still recorded a failure", () => {
+    expect(
+      backfillExitCode(
+        report({
+          outcome: "committed",
+          failures: [{ kind: "account", id: "bank-a", reason: "x" }],
+        })
+      )
+    ).toBe(1);
+  });
+});
+
+describe("formatBackfillReport — outcomes an operator must not misread", () => {
+  it("never says COMMITTED about a run that never started", () => {
+    const lines = formatBackfillReport(
+      backfillReport({ outcome: "not-started" })
+    ).join("\n");
+
+    expect(lines).toContain("NOT STARTED");
+    expect(lines).toContain("not the same as a rollback");
+    expect(lines).not.toContain("COMMITTED");
+  });
+
+  it("shouts when the outcome is unknown and tells the operator not to re-run blindly", () => {
+    const lines = formatBackfillReport(backfillReport({ outcome: "unknown" })).join("\n");
+
+    expect(lines).toContain("OUTCOME UNKNOWN");
+    expect(lines).toContain("DO NOT re-run blindly");
+    expect(lines).not.toContain("nothing was written");
   });
 });

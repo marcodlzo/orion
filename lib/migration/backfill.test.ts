@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ConstraintViolationError } from "../db/errors";
+import { ConstraintViolationError, DatabaseUnavailableError } from "../db/errors";
 import type { TransactionClient } from "../db/pool";
 import type {
   BankingCustomerInput,
@@ -84,9 +84,13 @@ function fakeDatabase() {
       } catch (error) {
         staged = { customers: [], accounts: [] };
         counts.rollbacks += 1;
-        // withTransaction re-wraps what the body threw; mirror that so the
-        // unwrapping in runBackfill is genuinely exercised.
-        throw new Error("transaction failed", { cause: error });
+        // Mirrors production EXACTLY: withTransaction rethrows what the
+        // callback threw, unchanged. The previous fake wrapped it, which is why
+        // a test claiming "a TypeError still throws" passed while production
+        // converted that TypeError into a QueryFailedError and reported it as a
+        // migration outcome. A fake whose error semantics differ from the real
+        // thing tests the fake.
+        throw error;
       }
     },
 
@@ -261,20 +265,23 @@ describe("runBackfill — dry run", () => {
     expect(report.dryRun).toBe(true);
   });
 
-  it("does not swallow a programming error as if it were the rollback", async () => {
+  it("classifies a failure before BEGIN as not-started, not a rollback", async () => {
     const db = fakeDatabase();
 
-    await expect(
-      runBackfill(
-        { dryRun: true },
-        deps({
-          ...db.deps,
-          runInTransaction: async () => {
-            throw new Error("connection lost");
-          },
-        })
-      )
-    ).rejects.toThrow("connection lost");
+    const report = await runBackfill(
+      { dryRun: true },
+      deps({
+        ...db.deps,
+        runInTransaction: async () => {
+          throw new DatabaseUnavailableError("connection lost");
+        },
+      })
+    );
+
+    // "not-started" and "rolled-back" are different facts. Nothing was
+    // attempted here, as opposed to attempted and undone.
+    expect(report.outcome).toBe("not-started");
+    expect(report.customers.created).toBe(0);
   });
 });
 
@@ -395,8 +402,11 @@ describe("runBackfill — failures", () => {
     expect(report.outcome).toBe("rolled-back");
     expect(report.customers.created).toBe(0);
     expect(report.accounts.created).toBe(0);
+    // The failure names the record that actually failed. It used to say
+    // `customer (transaction)` for everything, including this account.
     const failure = report.failures[report.failures.length - 1];
-    expect(failure.id).toBe("(transaction)");
+    expect(failure.kind).toBe("account");
+    expect(failure.id).toBe("bank-doc-1");
     // The reason carries the classification, never the driver's message — a
     // constraint error quotes the offending row back at you.
     expect(failure.reason).toBe(
@@ -895,17 +905,20 @@ describe("runBackfill — secret containment", () => {
       deps({
         readBanks: async () => scan([taintedBank()]),
         runInTransaction: async () => {
-          throw new Error("connection failed");
+          throw new DatabaseUnavailableError(
+            `could not connect to postgresql://orion:${DB_PASSWORD}@localhost/orion`
+          );
         },
       })
     ).then(
-      () => null,
+      (report) => report,
       (e: unknown) => e as Error
     );
 
-    expect(thrown).toBeInstanceOf(Error);
-    assertClean(thrown!.message, "error message");
-    assertClean(thrown!.stack ?? "", "error stack");
+    // An infrastructure failure is now classified into a report rather than
+    // thrown, so the sentinel check runs against what an operator actually
+    // sees. The driver's message is never copied into it.
+    assertClean(JSON.stringify(thrown), "aborted report");
   });
 
   it("keeps sentinels out of the report when the source read was short", async () => {
@@ -1072,10 +1085,9 @@ describe("runBackfill — outcome reflects the database", () => {
       (e: unknown) => e
     );
 
-    // The transaction helper wraps what the body threw, so the TypeError is the
-    // cause rather than the thrown value itself.
-    expect(thrown).toBeInstanceOf(Error);
-    expect((thrown as { cause?: unknown }).cause).toBeInstanceOf(TypeError);
+    // withTransaction rethrows the callback's error UNCHANGED, so a programming
+    // defect arrives here as itself and keeps propagating.
+    expect(thrown).toBeInstanceOf(TypeError);
   });
 });
 

@@ -113,7 +113,7 @@ describe("verifyMigration — a matching migration", () => {
     });
   });
 
-  it("passes only once an operator explicitly acknowledges the skip code", async () => {
+  it("passes only once an operator explicitly acknowledges that record", async () => {
     const withPartial = deps({
       readUsers: async () => scan([user(), user({ $id: "partial", userId: "" })]),
       readBanks: async () => scan([bank()]),
@@ -123,7 +123,7 @@ describe("verifyMigration — a matching migration", () => {
     // mapper skipped it" and "a human agreed it should be skipped" are
     // different facts, and only the second justifies a green verification.
     const acknowledged = await verifyMigration(withPartial, {
-      acknowledgedSkipCodes: ["MISSING_AUTH_ID"],
+      acknowledged: ["MISSING_AUTH_ID:partial"],
     });
 
     expect(acknowledged.ok).toBe(true);
@@ -136,7 +136,7 @@ describe("verifyMigration — a matching migration", () => {
         readUsers: async () => scan([user(), user({ $id: "dupe", userId: "auth-1" })]),
         readBanks: async () => scan([bank()]),
       }),
-      { acknowledgedSkipCodes: ["MISSING_AUTH_ID"] }
+      { acknowledged: ["MISSING_AUTH_ID:partial"] }
     );
 
     expect(report.ok).toBe(false);
