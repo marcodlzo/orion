@@ -122,6 +122,45 @@ describe("stripComments", () => {
   });
 });
 
+/**
+ * Repo-relative paths this module imports AT RUN TIME.
+ *
+ * `import type { X } from "./y"` is erased by the compiler, so it is not an
+ * execution path and is deliberately excluded. Counting it would fail a module
+ * for a dependency that does not exist when the code runs — which is the
+ * opposite of what the reachability suites are trying to measure. A formatter
+ * that names a report type is not a caller of the thing that produces it.
+ *
+ * Only relative and `@/` specifiers are followed; a bare package name is not
+ * part of this repository's graph.
+ */
+function resolveRuntimeImports(code: string, rel: string): string[] {
+  const out: string[] = [];
+  const IMPORT = /(?:^|[\n;])\s*(?:import|export)\s+([\s\S]*?)\bfrom\s+["']([^"']+)["']/g;
+
+  let m: RegExpExecArray | null;
+  while ((m = IMPORT.exec(code)) !== null) {
+    if (/^type\b/.test(m[1].trim())) continue; // erased at compile time
+
+    const spec = m[2];
+    let base: string;
+    if (spec.startsWith("@/")) base = join(ROOT, spec.slice(2));
+    else if (spec.startsWith(".")) base = join(ROOT, rel, "..", spec);
+    else continue;
+
+    for (const cand of [base + ".ts", base + ".tsx", join(base, "index.ts")]) {
+      try {
+        statSync(cand);
+        out.push(cand.slice(ROOT.length).replace(/\\/g, "/"));
+        break;
+      } catch {
+        /* not this extension */
+      }
+    }
+  }
+  return out;
+}
+
 function findActionModules(): ActionModule[] {
   const files: string[] = [];
   for (const dir of SEARCH) {
@@ -437,22 +476,7 @@ describe("provider capabilities never reach client source", () => {
       const raw = readFileSync(full, "utf8");
       const code = stripComments(raw);
 
-      const imports: string[] = [];
-      for (const spec of matchAllGroups(code, /from\s+["']([^"']+)["']/g)) {
-        let base: string;
-        if (spec.startsWith("@/")) base = join(ROOT, spec.slice(2));
-        else if (spec.startsWith(".")) base = join(ROOT, rel, "..", spec);
-        else continue;
-        for (const cand of [base + ".ts", base + ".tsx", join(base, "index.ts")]) {
-          try {
-            statSync(cand);
-            imports.push(cand.slice(ROOT.length).replace(/\\/g, "/"));
-            break;
-          } catch {
-            /* not this extension */
-          }
-        }
-      }
+      const imports = resolveRuntimeImports(code, rel);
 
       mods.set(rel, {
         file: rel,
@@ -696,22 +720,7 @@ describe("migration tooling stays out of the request path", () => {
       const raw = readFileSync(full, "utf8");
       const code = stripComments(raw);
 
-      const imports: string[] = [];
-      for (const spec of matchAllGroups(code, /from\s+["']([^"']+)["']/g)) {
-        let base: string;
-        if (spec.startsWith("@/")) base = join(ROOT, spec.slice(2));
-        else if (spec.startsWith(".")) base = join(ROOT, rel, "..", spec);
-        else continue;
-        for (const cand of [base + ".ts", base + ".tsx", join(base, "index.ts")]) {
-          try {
-            statSync(cand);
-            imports.push(cand.slice(ROOT.length).replace(/\\/g, "/"));
-            break;
-          } catch {
-            /* not this extension */
-          }
-        }
-      }
+      const imports = resolveRuntimeImports(code, rel);
 
       mods.set(rel, {
         file: rel,
@@ -874,10 +883,14 @@ describe("migration tooling stays out of the request path", () => {
   });
 
   it("every migration module that performs I/O declares server-only", () => {
+    // mapping.ts and report-format.ts are pure — no clients, no environment,
+    // no I/O. They stay importable anywhere and are tested without a database.
+    // report-format.ts returns lines rather than printing them precisely so it
+    // can be asserted against for what it must never emit.
+    const PURE = ["mapping.ts", "report-format.ts"];
+
     for (const file of migrationModules) {
-      // mapping.ts is pure — no clients, no environment, no I/O — so it stays
-      // importable anywhere and is tested without a database.
-      if (file.endsWith("mapping.ts")) continue;
+      if (PURE.some((p) => file.endsWith(p))) continue;
       expect(graph.get(file)!.code, `${file} must import server-only`).toMatch(
         /import\s+["']server-only["']/
       );

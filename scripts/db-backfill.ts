@@ -11,80 +11,16 @@
  * The dry run is not a simulation — it opens a real transaction, performs every
  * insert, and rolls back. Constraint violations surface exactly as they would
  * on the real run.
+ *
+ * Formatting lives in lib/migration/report-format.ts so it can be tested for
+ * what it must never print. This file only decides exit codes.
  */
 import { closePool } from "../lib/db/pool";
-import { runBackfill, type BackfillReport } from "../lib/migration/backfill";
-
-function render(report: BackfillReport): void {
-  const mode = report.dryRun ? "DRY RUN — nothing was written" : "COMMITTED";
-  const line = "─".repeat(64);
-
-  const { users, banks } = report.source;
-
-  console.log(line);
-  console.log(`Appwrite → PostgreSQL backfill   [${mode}]`);
-  console.log(line);
-  // Source evidence, not just counts: "12 customers migrated" is equally true
-  // of a complete read and of one that stopped after the first page.
-  console.log(
-    `source users      ${users.scanned}/${users.reportedTotal} scanned over ${users.pages} page(s)${users.complete ? "" : "   *** INCOMPLETE ***"}`
-  );
-  console.log(
-    `source banks      ${banks.scanned}/${banks.reportedTotal} scanned over ${banks.pages} page(s)${banks.complete ? "" : "   *** INCOMPLETE ***"}`
-  );
-  console.log(
-    `customers         ${report.customers.created} created, ${report.customers.existing} already present, ${report.customers.failed} failed`
-  );
-  console.log(
-    `linked accounts   ${report.accounts.created} created, ${report.accounts.updated} updated, ${report.accounts.blocked} blocked, ${report.accounts.failed} failed`
-  );
-  console.log(
-    `enrichment        ${report.enrichment.succeeded} ok, ${report.enrichment.failed} failed`
-  );
-
-  if (report.skipped.length) {
-    console.log(`\nskipped by mapping (${report.skipped.length}) — these will NOT migrate:`);
-    for (const s of report.skipped) {
-      console.log(`  ${s.kind} ${s.id}: [${s.code}] ${s.reason}`);
-    }
-  }
-
-  const degradedOnly = report.enrichmentFailures.filter((f) => !f.blocked);
-  const blockedByProvider = report.enrichmentFailures.filter((f) => f.blocked);
-
-  if (degradedOnly.length) {
-    console.log(
-      `\nprovider metadata unavailable (${degradedOnly.length}) — MIGRATED with placeholder names; a re-run fills them in and will not overwrite good data:`
-    );
-    for (const f of degradedOnly) {
-      console.log(`  ${f.legacyBankDocumentId}: [${f.code}] ${f.reason}`);
-    }
-  }
-
-  if (blockedByProvider.length) {
-    console.log(
-      `\nNOT MIGRATED (${blockedByProvider.length}) — migrating these would require inventing a fact:`
-    );
-    for (const f of blockedByProvider) {
-      console.log(`  ${f.legacyBankDocumentId}: [${f.code}] ${f.reason}`);
-    }
-  }
-
-  if (report.failures.length) {
-    console.log(`\nWRITE FAILURES (${report.failures.length}):`);
-    for (const f of report.failures) console.log(`  ${f.kind} ${f.id}: ${f.reason}`);
-  }
-
-  console.log(line);
-  if (!report.source.complete) {
-    console.log(
-      "SOURCE READ WAS INCOMPLETE. Do not treat this run as a complete migration."
-    );
-  }
-  if (report.dryRun) {
-    console.log("Nothing was written. Re-run with --commit to apply.");
-  }
-}
+import { runBackfill } from "../lib/migration/backfill";
+import {
+  describeThrown,
+  formatBackfillReport,
+} from "../lib/migration/report-format";
 
 async function main(): Promise<number> {
   const commit = process.argv.includes("--commit");
@@ -95,7 +31,7 @@ async function main(): Promise<number> {
   }
 
   const report = await runBackfill({ dryRun: !commit });
-  render(report);
+  for (const line of formatBackfillReport(report)) console.log(line);
 
   // A failed write is an error even though the tool completed, and so is a
   // short source read — a run over partial data must not look successful.
@@ -110,12 +46,7 @@ main()
     process.exit(code);
   })
   .catch(async (error: unknown) => {
-    // Print the type, not the object: a driver error can quote the offending
-    // row and a provider error can echo the request.
-    console.error(
-      "Backfill aborted:",
-      error instanceof Error ? `${error.name}: ${error.message}` : "unknown error"
-    );
+    console.error("Backfill aborted:", describeThrown(error));
     await closePool().catch(() => undefined);
     process.exit(1);
   });
