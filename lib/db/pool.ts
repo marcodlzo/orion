@@ -94,6 +94,70 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
 }
 
 /**
+ * Read several tables as one consistent snapshot, taken AFTER waiting for an
+ * advisory lock.
+ *
+ * THE ORDERING IS THE WHOLE POINT, and getting it wrong is silent.
+ *
+ * PostgreSQL establishes a REPEATABLE READ snapshot at the transaction's FIRST
+ * STATEMENT, not at BEGIN. So this does not work:
+ *
+ *   BEGIN ISOLATION LEVEL REPEATABLE READ;
+ *   SELECT pg_advisory_xact_lock(k);   -- snapshot taken HERE, then blocks
+ *   SELECT ... ;                       -- reads the pre-wait snapshot
+ *
+ * The reader waits for the writer, and then reads the database as it was
+ * before the writer committed. It looks perfectly synchronised and returns
+ * stale data.
+ *
+ * A SESSION-level lock, acquired before BEGIN, fixes it: the transaction's
+ * first statement is then a real read, so the snapshot is established after the
+ * lock was granted. Session locks outlive the transaction, so this must unlock
+ * before returning the client to the pool — and destroy the client if it
+ * cannot, rather than handing the next caller a connection still holding it.
+ */
+export async function withLockedSnapshot<T>(
+  lockKey: number,
+  fn: (client: PoolClient) => Promise<T>
+): Promise<T> {
+  const client = await getPool().connect().catch((error) => {
+    throw toDatabaseError(error);
+  });
+
+  let suspect = false;
+
+  try {
+    // Session level, BEFORE BEGIN. Blocks until any in-flight migration
+    // holding the same key has committed or rolled back.
+    await client.query("SELECT pg_advisory_lock($1)", [lockKey]);
+
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
+      // fn's first read is the transaction's first statement, so the snapshot
+      // begins here — after the lock.
+      const result = await fn(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => {
+        suspect = true;
+      });
+      throw toDatabaseError(error);
+    } finally {
+      // Must happen even on failure: a session lock left held would block every
+      // later migration until this connection is closed.
+      await client.query("SELECT pg_advisory_unlock($1)", [lockKey]).catch(() => {
+        suspect = true;
+      });
+    }
+  } finally {
+    client.release(
+      suspect ? new Error("connection may still hold an advisory lock") : undefined
+    );
+  }
+}
+
+/**
  * Run a function inside a single transaction on one client.
  *
  * Exists now because the reason PostgreSQL was chosen at all is multi-row

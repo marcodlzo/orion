@@ -299,10 +299,25 @@ dropped.
 
 **Not proved:** that Appwrite held still while it was being read — it stays
 live throughout, so a verification is a statement about the dataset it observed,
-which is why the report carries that dataset's digest. PostgreSQL *is* read
-consistently: both tables come from one REPEATABLE READ snapshot taken after
-waiting on the migration advisory lock, so a concurrent backfill cannot tear the
-comparison.
+which is why the report carries that dataset's digest.
+
+PostgreSQL *is* read consistently. Both tables come from one REPEATABLE READ
+snapshot, and the ordering that makes that meaningful is worth stating because
+getting it wrong is silent:
+
+1. a **session-level** advisory lock is acquired first, blocking until any
+   in-flight backfill has finished;
+2. only then does the transaction begin;
+3. the first read establishes the snapshot — after the lock.
+
+Doing it the obvious way round does not work. PostgreSQL establishes a
+REPEATABLE READ snapshot at the transaction's **first statement**, not at
+`BEGIN`, so a `pg_advisory_xact_lock` issued inside the transaction takes the
+snapshot *before* it blocks. The verifier then waits for the migration and reads
+the database as it was beforehand — perfectly synchronised, and stale. The
+report carries the isolation level as PostgreSQL reports it, and
+`backfill.db.test.ts` asserts post-wait visibility rather than only that the
+read blocks.
 
 Also not proved: that stored provider metadata is *correct*. The verifier
 compares Appwrite against PostgreSQL, and Appwrite does not hold the metadata —

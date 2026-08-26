@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { closePool, getPool, query, withTransaction } from "../db/pool";
+import {
+  closePool,
+  getPool,
+  query,
+  withLockedSnapshot,
+  withTransaction,
+} from "../db/pool";
 import { requireTestDatabase } from "../db/test-database";
 import {
   DatabaseUnavailableError,
@@ -1116,5 +1122,144 @@ describe("conflict reporting names both sides", () => {
     const reason = report.failures[report.failures.length - 1].reason;
     expect(reason).not.toContain("access-sandbox");
     expect(reason).not.toContain("orion_dev_password");
+  });
+});
+
+/**
+ * POST-WAIT VISIBILITY.
+ *
+ * The defect this exists to catch: the verifier blocked on the advisory lock
+ * exactly as intended, and then read a snapshot established BEFORE the wait —
+ * so it waited for the migration and reported the database as it was
+ * beforehand. Every previous test passed, because blocking was all they
+ * checked.
+ *
+ * Deterministic, not racing: the holder controls when the commit happens.
+ */
+describe("verifier sees what it waited for", () => {
+  it("observes rows committed while it was blocked", async () => {
+    const holder = await getPool().connect();
+    let released = false;
+
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT pg_advisory_xact_lock($1)", [MIGRATION_LOCK_KEY]);
+
+      // Uncommitted, and uniquely tagged so it cannot be confused with fixture
+      // data from another test.
+      const tag = `visibility-${Date.now()}`;
+      const { rows } = await holder.query<{ id: string }>(
+        `INSERT INTO banking_customers (appwrite_auth_id, appwrite_user_document_id)
+         VALUES ($1, $2) RETURNING id`,
+        [`auth-${tag}`, `doc-${tag}`]
+      );
+      await holder.query(
+        `INSERT INTO linked_accounts (
+           customer_id, legacy_appwrite_bank_document_id, external_account_id,
+           provider, display_name, currency
+         ) VALUES ($1, $2, $3, 'plaid', 'Visibility Check', 'USD')`,
+        [rows[0].id, `bank-${tag}`, `acct-${tag}`]
+      );
+
+      let settled = false;
+      const read = defaultVerifyDeps.readPostgres().then((r) => {
+        settled = true;
+        return r;
+      });
+
+      // It must genuinely wait.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(settled, "verifier did not block on the migration lock").toBe(false);
+
+      await holder.query("COMMIT");
+      holder.release();
+      released = true;
+
+      const pg = await read;
+
+      // THE ASSERTION THAT WAS MISSING. Blocking is worthless if the snapshot
+      // predates the commit that was being waited for.
+      expect(
+        pg.customers.map((c) => c.appwrite_auth_id),
+        "verifier waited for the migration and then read a pre-commit snapshot"
+      ).toContain(`auth-${tag}`);
+      expect(pg.accounts.map((a) => a.external_account_id)).toContain(`acct-${tag}`);
+    } finally {
+      if (!released) {
+        await holder.query("ROLLBACK").catch(() => undefined);
+        holder.release();
+      }
+    }
+  });
+
+  it("sees both tables consistently, not one before and one after", async () => {
+    const holder = await getPool().connect();
+    let released = false;
+
+    try {
+      await holder.query("BEGIN");
+      await holder.query("SELECT pg_advisory_xact_lock($1)", [MIGRATION_LOCK_KEY]);
+
+      const tag = `paired-${Date.now()}`;
+      const { rows } = await holder.query<{ id: string }>(
+        `INSERT INTO banking_customers (appwrite_auth_id, appwrite_user_document_id)
+         VALUES ($1, $2) RETURNING id`,
+        [`auth-${tag}`, `doc-${tag}`]
+      );
+      await holder.query(
+        `INSERT INTO linked_accounts (
+           customer_id, legacy_appwrite_bank_document_id, external_account_id,
+           provider, display_name, currency
+         ) VALUES ($1, $2, $3, 'plaid', 'Paired Check', 'USD')`,
+        [rows[0].id, `bank-${tag}`, `acct-${tag}`]
+      );
+
+      const read = defaultVerifyDeps.readPostgres();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await holder.query("COMMIT");
+      holder.release();
+      released = true;
+
+      const pg = await read;
+      const account = pg.accounts.find((a) => a.external_account_id === `acct-${tag}`);
+
+      // An account whose customer is absent is the shape a torn read produces.
+      expect(account).toBeDefined();
+      expect(pg.customers.map((c) => c.id)).toContain(account!.customer_id);
+    } finally {
+      if (!released) {
+        await holder.query("ROLLBACK").catch(() => undefined);
+        holder.release();
+      }
+    }
+  });
+
+  it("does not leave the advisory lock held after reading", async () => {
+    await defaultVerifyDeps.readPostgres();
+
+    // A session-level lock outlives its transaction. Failing to release it
+    // would block every later migration until that connection closed — and the
+    // connection goes back into the pool.
+    const { rows } = await query<{ locked: boolean }>(
+      "SELECT pg_try_advisory_lock($1) AS locked",
+      [MIGRATION_LOCK_KEY]
+    );
+    expect(rows[0].locked).toBe(true);
+    await query("SELECT pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]);
+  });
+
+  it("releases the lock even when the read fails", async () => {
+    await expect(
+      withLockedSnapshot(MIGRATION_LOCK_KEY, async () => {
+        throw new Error("read failed");
+      })
+    ).rejects.toThrow();
+
+    const { rows } = await query<{ locked: boolean }>(
+      "SELECT pg_try_advisory_lock($1) AS locked",
+      [MIGRATION_LOCK_KEY]
+    );
+    expect(rows[0].locked).toBe(true);
+    await query("SELECT pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]);
   });
 });

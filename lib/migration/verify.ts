@@ -16,7 +16,7 @@ import {
   type LegacyUserDocument,
   type SourceScan,
 } from "./appwrite-source";
-import { withTransaction } from "../db/pool";
+import { withLockedSnapshot } from "../db/pool";
 import { MIGRATION_LOCK_KEY } from "./lock";
 import { planMigration, type SkipCode } from "./mapping";
 
@@ -142,22 +142,22 @@ export const defaultVerifyDeps: VerifyDeps = {
   readUsers: readAllLegacyUsers,
   readBanks: readAllLegacyBanks,
   readPostgres: () =>
-    withTransaction(
-      async (client) => {
-        // Waits for any in-flight backfill to finish, so the snapshot below is
-        // taken between migrations rather than through one.
-        await client.query("SELECT pg_advisory_xact_lock($1)", [MIGRATION_LOCK_KEY]);
-        const { rows } = await client.query<{ level: string }>(
-          "SELECT current_setting('transaction_isolation') AS level"
-        );
-        return {
-          customers: await listBankingCustomers(client),
-          accounts: await listLinkedAccounts(client),
-          isolation: rows[0].level,
-        };
-      },
-      { isolation: "repeatable read" }
-    ),
+    withLockedSnapshot(MIGRATION_LOCK_KEY, async (client) => {
+      // The lock was taken at SESSION level before BEGIN, so this read — the
+      // transaction's first statement — is what establishes the snapshot, and
+      // it sees everything the migration we waited for committed.
+      //
+      // Taking the lock INSIDE the transaction looked equivalent and was not:
+      // the snapshot would have been established by the lock statement itself,
+      // before it blocked, so the verifier waited for the writer and then read
+      // the database as it was beforehand.
+      const customers = await listBankingCustomers(client);
+      const accounts = await listLinkedAccounts(client);
+      const { rows } = await client.query<{ level: string }>(
+        "SELECT current_setting('transaction_isolation') AS level"
+      );
+      return { customers, accounts, isolation: rows[0].level };
+    }),
 };
 
 /**
