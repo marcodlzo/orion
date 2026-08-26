@@ -22,10 +22,16 @@ import {
   type EnrichmentFailureCode,
   type EnrichmentOutcome,
 } from "./enrichment";
+import { MIGRATION_LOCK_KEY } from "./lock";
 import { planMigration, type LinkedAccountPlan, type SkippedRecord } from "./mapping";
 
 export type BackfillFailure = {
-  kind: "customer" | "account";
+  /**
+   * `transaction` is not a record kind — it is the transaction itself failing,
+   * as a failed COMMIT does. Attributing that to the last customer sent an
+   * operator to look at a row that had nothing wrong with it.
+   */
+  kind: "customer" | "account" | "transaction";
   id: string;
   reason: string;
 };
@@ -72,6 +78,9 @@ export type BackfillOutcome =
   /**
    * COMMIT failed. Whether the writes are durable is UNKNOWN and cannot be
    * determined from here — inspect the database before re-running.
+   *
+   * Counters on an `unknown` report are ATTEMPTED, not durable. Zeroing them
+   * would be as false as claiming them: the rows may well be there.
    */
   | "unknown"
   /** Refused before any provider call or write. Nothing happened at all. */
@@ -114,22 +123,6 @@ export type BackfillDeps = {
   upsertAccount: typeof upsertLinkedAccount;
 };
 
-/**
- * Advisory-lock key for the backfill. Arbitrary but fixed.
- *
- * Two backfills running at once against the same dataset both try to insert the
- * same customer. `ON CONFLICT (appwrite_auth_id)` only arbitrates that one
- * index, so the loser's INSERT can still trip the unique index on
- * appwrite_user_document_id and fail with 23505 — an unchanged re-run reporting
- * a failure that is nothing but a race with itself.
- *
- * The stored result was always correct, because the schema does its job. The
- * OPERATIONAL semantics were not: an operator cannot tell that failure from a
- * real one. A transaction-scoped advisory lock makes the second run wait and
- * then take the ordinary "already present" path. It is released automatically
- * on commit or rollback, so a crashed run cannot leave it held.
- */
-export const MIGRATION_LOCK_KEY = 4_812_007;
 
 export const defaultDeps: BackfillDeps = {
   readUsers: readAllLegacyUsers,
@@ -411,13 +404,30 @@ export async function runBackfill(
     // A COMMIT that failed leaves the durable outcome genuinely unknown. Saying
     // "rolled back" here would assert something nobody can know.
     if (error instanceof TransactionOutcomeUnknownError) {
-      return failedReport("unknown", error, current);
+      // DELIBERATELY NOT failedReport(). That builder zeroes every counter,
+      // which is a factual claim — and here it is a claim that can be, and has
+      // been, contradicted by the database: a lost COMMIT acknowledgement
+      // leaves the rows durable. The counters are kept and labelled attempted.
+      return {
+        ...report,
+        outcome: "unknown",
+        finishedAt: new Date().toISOString(),
+        failures: [
+          ...report.failures,
+          { kind: "transaction", id: "(commit)", reason: describe(error) },
+        ],
+      };
     }
 
     // Reached the database but never opened the transaction: no connection, or
     // BEGIN itself failed. Nothing was written because nothing was attempted —
     // which is a different fact from "we wrote and undid it".
-    if (!started) {
+    //
+    // The DatabaseError requirement matters: a TypeError thrown by the
+    // transaction helper BEFORE it invoked the callback also leaves `started`
+    // false, and reporting that as an infrastructure outcome hid a programming
+    // defect just as the callback path used to.
+    if (!started && error instanceof DatabaseError) {
       return failedReport("not-started", error, current);
     }
 
@@ -524,6 +534,15 @@ function isExpectedFailure(error: unknown): boolean {
 }
 
 function describe(error: unknown): string {
+  // An identity conflict is the one failure where the STORED value is the whole
+  // point: "this bridge is already claimed" is useless without saying by what.
+  // Both sides are ids the operator already has access to, not row data.
+  for (const link of chain(error)) {
+    if (link instanceof IdentityConflictError) {
+      return `IdentityConflictError / stored=${link.stored} / incoming=${link.incoming}`;
+    }
+  }
+
   // The transaction helper re-wraps what the body threw, so the OUTERMOST error
   // is a generic wrapper: name "Error", no code, no constraint. Taking the
   // first link with any readable field therefore produced the useless reason

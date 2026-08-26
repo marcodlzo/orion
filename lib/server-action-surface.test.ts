@@ -983,7 +983,10 @@ describe("migration tooling stays out of the request path", () => {
     // no I/O. They stay importable anywhere and are tested without a database.
     // report-format.ts returns lines rather than printing them precisely so it
     // can be asserted against for what it must never emit.
-    const PURE = ["mapping.ts", "report-format.ts"];
+    // lock.ts is a single exported number with no imports at all — shared by
+    // the backfill and the verifier precisely so the verifier need not import
+    // the backfill. A shared constant is not a shared capability.
+    const PURE = ["mapping.ts", "report-format.ts", "lock.ts"];
 
     for (const file of migrationModules) {
       if (PURE.some((p) => file.endsWith(p))) continue;

@@ -56,9 +56,14 @@ written rows; an architecture test asserts it against the source.
 npm run db:up                  # start PostgreSQL
 npm run db:migrate             # apply the schema
 
-npm run db:backfill            # DRY RUN — writes nothing (the default)
-npm run db:backfill:commit     # actually write
-npm run db:verify              # compare both stores, exit non-zero on drift
+# 1. DRY RUN (the default). Writes nothing, and prints a source digest.
+npm run db:backfill
+
+# 2. COMMIT the dataset that dry run approved. The digest is REQUIRED.
+npm run db:backfill:commit -- --expect-source=<digest from step 1>
+
+# 3. VERIFY. Exits non-zero on drift.
+npm run db:verify
 ```
 
 ### Running the tests
@@ -115,8 +120,9 @@ command to apply what it approved:
 npm run db:backfill:commit -- --expect-source=<digest>
 ```
 
-The commit refuses if the source moved. The flag is opt-in — requiring it would
-make a first run impossible — but a cutover should always use it.
+`--expect-source` is **required** for a commit and refuses if the source moved.
+A dry run needs none — it produces the digest — so there is no first-run
+problem. An unbound commit is not possible: optional binding is not binding.
 
 ### Only one migration runs at a time
 
@@ -230,6 +236,8 @@ accumulated before the abort. Every report carries an outcome:
 | `dry-run` | Writes executed and were undone. Counters are a forecast. |
 | `rolled-back` | A failure aborted the transaction. **Nothing** was written; counters are zero. |
 | `refused` | Stopped before any provider call or write. Nothing happened at all. |
+| `not-started` | The transaction never opened — no connection, or BEGIN failed. Nothing was attempted, which is **not** the same as a rollback. |
+| `unknown` | **COMMIT failed.** PostgreSQL may or may not have applied the transaction; the acknowledgement was lost and a later ROLLBACK cannot undo a commit that already happened. The counters are what the run **attempted** — they are not a claim about durability in either direction. Inspect the database before re-running. The upserts are idempotent, so a re-run is safe once you know the state. |
 
 A run is refused when the source read was incomplete, or when `--expect-source`
 does not match. Refusal happens before enrichment, so it costs nothing and
@@ -289,7 +297,14 @@ inform one.
 duplicated; the source was read completely; and no source record was silently
 dropped.
 
-**Not proved:** that stored provider metadata is *correct*. The verifier
+**Not proved:** that Appwrite held still while it was being read — it stays
+live throughout, so a verification is a statement about the dataset it observed,
+which is why the report carries that dataset's digest. PostgreSQL *is* read
+consistently: both tables come from one REPEATABLE READ snapshot taken after
+waiting on the migration advisory lock, so a concurrent backfill cannot tear the
+comparison.
+
+Also not proved: that stored provider metadata is *correct*. The verifier
 compares Appwrite against PostgreSQL, and Appwrite does not hold the metadata —
 name, official name, mask, type, subtype and currency all come from Plaid, which
 this command deliberately never calls. A row containing plausible-but-wrong
@@ -311,12 +326,14 @@ Every skip is now drift. An operator who has judged a specific code acceptable
 for this dataset can acknowledge it explicitly:
 
 ```bash
-npm run db:verify -- --acknowledge=MISSING_AUTH_ID
+npm run db:verify -- --acknowledge=MISSING_AUTH_ID:user-doc-42
 ```
 
-Acknowledgement is per-code and per-run, because "the mapper skipped it" and "a
-human agreed it should be skipped" are different facts and only the second
-justifies a green result.
+Acknowledgement is **per record**, as `CODE:sourceId` — the exact token the
+drift line prints. Per-code would have absolved every future record that
+happened to share a code, so a run approved for one partial signup would keep
+passing as new ones appeared. "The mapper skipped it" and "a human reviewed this
+one" are different facts, and only the second justifies a green result.
 
 **It never repairs anything.** Deleting a PostgreSQL customer because Appwrite
 no longer has the document would destroy financial history on a tool's

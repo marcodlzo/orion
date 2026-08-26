@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { closePool, query, withTransaction } from "../db/pool";
+import { closePool, getPool, query, withTransaction } from "../db/pool";
 import { requireTestDatabase } from "../db/test-database";
 import {
   DatabaseUnavailableError,
   IdentityConflictError,
   TransactionOutcomeUnknownError,
 } from "../db/errors";
+import { backfillExitCode, formatBackfillReport } from "./report-format";
 import { upsertBankingCustomer } from "../db/repositories/banking-customers.repository";
 import {
   findLinkedAccountByLegacyDocumentId,
@@ -17,9 +18,10 @@ import type {
   LegacyUserDocument,
   SourceScan,
 } from "./appwrite-source";
-import { MIGRATION_LOCK_KEY, runBackfill, type BackfillDeps } from "./backfill";
+import { runBackfill, type BackfillDeps } from "./backfill";
+import { MIGRATION_LOCK_KEY } from "./lock";
 import { FALLBACK_METADATA, type EnrichmentOutcome } from "./enrichment";
-import { verifyMigration, type VerifyDeps } from "./verify";
+import { defaultVerifyDeps, verifyMigration, type VerifyDeps } from "./verify";
 import {
   findCustomerByAuthId,
   listBankingCustomers,
@@ -434,8 +436,11 @@ describe("verification against real PostgreSQL", () => {
   ): VerifyDeps => ({
     readUsers: async () => scan(u),
     readBanks: async () => scan(b),
-    listCustomers: listBankingCustomers,
-    listAccounts: listLinkedAccounts,
+    readPostgres: async () => ({
+      customers: await listBankingCustomers(),
+      accounts: await listLinkedAccounts(),
+      isolation: "repeatable read",
+    }),
   });
 
   it("reports no drift after a successful commit", async () => {
@@ -823,5 +828,293 @@ describe("rejected conflicts are non-destructive", () => {
       appwrite_user_document_id: "user-doc-1",
     });
     expect(after!.updated_at).toEqual(before.updated_at);
+  });
+});
+
+/**
+ * A LOST COMMIT ACKNOWLEDGEMENT.
+ *
+ * The work really commits; only the acknowledgement is lost. Zeroing the
+ * counters here is not caution — it is a factual claim contradicted by the rows
+ * sitting in the database.
+ */
+describe("ambiguous COMMIT against real PostgreSQL", () => {
+  const users = [user(1)];
+  const banks = [bank(1, 1)];
+
+  /** Runs the real work, lets it commit, then loses the acknowledgement. */
+  const lostAck = (): BackfillDeps => ({
+    ...realDeps(users, banks),
+    runInTransaction: async (fn) => {
+      await withTransaction(fn);
+      // Committed. The client never found out.
+      throw new TransactionOutcomeUnknownError();
+    },
+  });
+
+  it("leaves the rows durable", async () => {
+    await runBackfill({ dryRun: false }, lostAck());
+
+    const after = await snapshot();
+    expect(after.customers).toHaveLength(1);
+    expect(after.accounts).toHaveLength(1);
+  });
+
+  it("does NOT claim zero creations while the rows exist", async () => {
+    const report = await runBackfill({ dryRun: false }, lostAck());
+
+    expect(report.outcome).toBe("unknown");
+    // The previous builder zeroed every counter for any non-success outcome,
+    // so this reported "0 created" against a database holding both rows.
+    expect(report.customers.created).toBe(1);
+    expect(report.accounts.created).toBe(1);
+  });
+
+  it("attributes the failure to the TRANSACTION, not to a record", async () => {
+    const report = await runBackfill({ dryRun: false }, lostAck());
+
+    const failure = report.failures[report.failures.length - 1];
+    expect(failure.kind).toBe("transaction");
+    expect(failure.id).toBe("(commit)");
+  });
+
+  it("labels the counters as attempted in operator output", async () => {
+    const report = await runBackfill({ dryRun: false }, lostAck());
+    const lines = formatBackfillReport(report).join("\n");
+
+    expect(lines).toContain("OUTCOME UNKNOWN");
+    expect(lines).toContain("ATTEMPTED — durability unknown");
+    expect(lines).toContain("may all be there");
+  });
+
+  it("exits non-zero so nothing treats it as success", async () => {
+    const report = await runBackfill({ dryRun: false }, lostAck());
+
+    expect(backfillExitCode(report)).toBe(1);
+  });
+
+  it("is safe to re-run once the operator has looked", async () => {
+    await runBackfill({ dryRun: false }, lostAck());
+
+    const second = await runBackfill({ dryRun: false }, realDeps(users, banks));
+
+    // The upserts are idempotent, so recovery is an ordinary re-run.
+    expect(second.outcome).toBe("committed");
+    expect(second.customers).toMatchObject({ created: 0, existing: 1 });
+    expect((await snapshot()).customers).toHaveLength(1);
+  });
+});
+
+describe("programming defects thrown before the callback", () => {
+  it("propagates rather than posing as not-started", async () => {
+    await expect(
+      runBackfill(
+        { dryRun: false },
+        {
+          ...realDeps([user(1)], [bank(1, 1)]),
+          runInTransaction: async () => {
+            // Never reaches the callback, so `started` stays false — which used
+            // to be reported as an infrastructure outcome regardless of cause.
+            throw new TypeError("helper defect");
+          },
+        }
+      )
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("still reports a genuine connection failure as not-started", async () => {
+    const report = await runBackfill(
+      { dryRun: false },
+      {
+        ...realDeps([user(1)], [bank(1, 1)]),
+        runInTransaction: async () => {
+          throw new DatabaseUnavailableError("connection refused");
+        },
+      }
+    );
+
+    expect(report.outcome).toBe("not-started");
+  });
+});
+
+describe("verification reads one consistent snapshot", () => {
+  it("never sees a backfill halfway through", async () => {
+    const users = [user(1), user(2), user(3)];
+    const banks = [bank(1, 1), bank(2, 2), bank(3, 3)];
+
+    // The verifier waits on the migration advisory lock and reads both tables
+    // in one REPEATABLE READ transaction, so a concurrent backfill cannot tear
+    // the comparison into "accounts whose customer does not exist".
+    const [, report] = await Promise.all([
+      runBackfill({ dryRun: false }, realDeps(users, banks)),
+      verifyMigration({
+        readUsers: async () => scan(users),
+        readBanks: async () => scan(banks),
+        readPostgres: defaultVerifyDeps.readPostgres,
+      }),
+    ]);
+
+    // The verifier legitimately runs either BEFORE the backfill (everything
+    // missing) or AFTER it (nothing missing). What it must never do is run
+    // THROUGH it and see a mixture.
+    const missingCustomers = report.drift.filter(
+      (d) => d.category === "missing-customer"
+    ).length;
+    const missingAccounts = report.drift.filter(
+      (d) => d.category === "missing-account"
+    ).length;
+
+    const allMissing =
+      missingCustomers === users.length && missingAccounts === banks.length;
+    const noneMissing = missingCustomers === 0 && missingAccounts === 0;
+
+    expect(
+      allMissing || noneMissing,
+      `torn read: ${missingCustomers}/${users.length} customers and ` +
+        `${missingAccounts}/${banks.length} accounts missing`
+    ).toBe(true);
+
+    // And never an account whose customer is absent — the shape a torn read
+    // produces when the two tables are queried as separate statements.
+    expect(report.drift.filter((d) => d.category === "orphan-account")).toEqual([]);
+  });
+
+  it("carries the source digest it verified against", async () => {
+    await runBackfill({ dryRun: false }, realDeps([user(1)], [bank(1, 1)]));
+
+    const report = await verifyMigration({
+      readUsers: async () => scan([user(1)]),
+      readBanks: async () => scan([bank(1, 1)]),
+      readPostgres: defaultVerifyDeps.readPostgres,
+    });
+
+    expect(report.legacy.scan.fingerprint).toBeTruthy();
+    expect(report.ok).toBe(true);
+  });
+});
+
+/**
+ * The verifier's snapshot guarantees, asserted BEHAVIOURALLY.
+ *
+ * A racing "did it tear?" test cannot prove this: with a small dataset the
+ * interleaving that tears simply may not occur, so removing the isolation level
+ * leaves it green. These ask PostgreSQL directly instead.
+ */
+describe("verifier snapshot mechanics", () => {
+  it("runs at REPEATABLE READ, as PostgreSQL reports it", async () => {
+    const level = await withTransaction(
+      async (client) => {
+        const { rows } = await client.query<{ level: string }>(
+          "SELECT current_setting('transaction_isolation') AS level"
+        );
+        return rows[0].level;
+      },
+      { isolation: "repeatable read" }
+    );
+
+    expect(level).toBe("repeatable read");
+  });
+
+  it("still defaults to read committed when isolation is not requested", async () => {
+    const level = await withTransaction(async (client) => {
+      const { rows } = await client.query<{ level: string }>(
+        "SELECT current_setting('transaction_isolation') AS level"
+      );
+      return rows[0].level;
+    });
+
+    expect(level).toBe("read committed");
+  });
+
+  it("BLOCKS while a migration holds the advisory lock", async () => {
+    const holder = await getPool().connect();
+    await holder.query("BEGIN");
+    await holder.query("SELECT pg_advisory_xact_lock($1)", [MIGRATION_LOCK_KEY]);
+
+    let settled = false;
+    const read = defaultVerifyDeps.readPostgres().then((r) => {
+      settled = true;
+      return r;
+    });
+
+    // Long enough that an unsynchronised reader would have finished.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(
+      settled,
+      "verifier read completed while a migration held the lock"
+    ).toBe(false);
+
+    await holder.query("COMMIT");
+    holder.release();
+
+    await read;
+    expect(settled).toBe(true);
+  });
+
+  it("returns both tables from the same read", async () => {
+    await runBackfill({ dryRun: false }, realDeps([user(1)], [bank(1, 1)]));
+
+    const pg = await defaultVerifyDeps.readPostgres();
+
+    expect(pg.customers).toHaveLength(1);
+    expect(pg.accounts).toHaveLength(1);
+    // The account's customer is present in the SAME snapshot — the pairing a
+    // torn read breaks.
+    expect(pg.accounts[0].customer_id).toBe(pg.customers[0].id);
+  });
+
+  it("reports the isolation level PostgreSQL actually gave it", async () => {
+    const pg = await defaultVerifyDeps.readPostgres();
+
+    // Asked of the server, not asserted from the call site — so removing the
+    // isolation option changes this value rather than leaving a stale label.
+    expect(pg.isolation).toBe("repeatable read");
+  });
+
+  it("surfaces that isolation in the verification report", async () => {
+    const report = await verifyMigration({
+      readUsers: async () => scan([]),
+      readBanks: async () => scan([]),
+      readPostgres: defaultVerifyDeps.readPostgres,
+    });
+
+    expect(report.postgres.isolation).toBe("repeatable read");
+  });
+});
+
+describe("conflict reporting names both sides", () => {
+  it("puts the stored and incoming bridges in the operator report", async () => {
+    await upsertBankingCustomer({
+      appwriteAuthId: "auth-1",
+      appwriteUserDocumentId: "an-older-document",
+    });
+
+    const report = await runBackfill(
+      { dryRun: false },
+      realDeps([user(1)], [bank(1, 1)])
+    );
+
+    const reason = report.failures[report.failures.length - 1].reason;
+
+    // "IdentityConflictError" alone sent the operator to the database to find
+    // out what it was conflicting WITH. Both values are ids they already have.
+    expect(reason).toContain("stored=an-older-document");
+    expect(reason).toContain("incoming=user-doc-1");
+  });
+
+  it("keeps the conflict reason free of row data", async () => {
+    await upsertBankingCustomer({
+      appwriteAuthId: "auth-1",
+      appwriteUserDocumentId: "an-older-document",
+    });
+
+    const report = await runBackfill(
+      { dryRun: false },
+      realDeps([user(1)], [bank(1, 1)])
+    );
+
+    const reason = report.failures[report.failures.length - 1].reason;
+    expect(reason).not.toContain("access-sandbox");
+    expect(reason).not.toContain("orion_dev_password");
   });
 });

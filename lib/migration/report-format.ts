@@ -89,9 +89,12 @@ export function formatBackfillReport(report: BackfillReport): string[] {
   // of a complete read and of one that stopped after the first page.
   out.push(scanLine("users", users), scanLine("banks", banks));
   out.push(`source digest     ${report.source.fingerprint}`);
+  // On an `unknown` outcome these are ATTEMPTED, not durable. Printing them
+  // unqualified under any heading would state something nobody can know.
+  const qualifier = report.outcome === "unknown" ? " (ATTEMPTED — durability unknown)" : "";
   out.push(
-    `customers         ${report.customers.created} created, ${report.customers.existing} already present, ${report.customers.failed} failed`,
-    `linked accounts   ${report.accounts.created} created, ${report.accounts.updated} updated, ${report.accounts.blocked} blocked, ${report.accounts.failed} failed`,
+    `customers         ${report.customers.created} created, ${report.customers.existing} already present, ${report.customers.failed} failed${qualifier}`,
+    `linked accounts   ${report.accounts.created} created, ${report.accounts.updated} updated, ${report.accounts.blocked} blocked, ${report.accounts.failed} failed${qualifier}`,
     `enrichment        ${report.enrichment.succeeded} ok, ${report.enrichment.failed} failed`
   );
 
@@ -145,8 +148,13 @@ export function formatBackfillReport(report: BackfillReport): string[] {
     out.push(
       "COMMIT FAILED. PostgreSQL may or may not have applied this transaction —",
       "the acknowledgement was lost, and a later ROLLBACK cannot undo a commit",
-      "that already happened. DO NOT re-run blindly. Inspect the database first;",
-      "the upserts are idempotent, so a re-run is safe once you know the state."
+      "that already happened.",
+      "",
+      "The counters above are what this run ATTEMPTED. They are not a claim",
+      "about what is durable, in either direction: the rows may all be there.",
+      "",
+      "DO NOT re-run blindly. Inspect the database first; the upserts are",
+      "idempotent, so a re-run is safe once you know the state."
     );
   }
   if (!report.source.complete) {
@@ -172,8 +180,9 @@ export function formatVerificationReport(report: VerificationReport): string[] {
     `legacy source     ${report.legacy.users} users, ${report.legacy.banks} bank documents`,
     `source scan       users ${scan.users.scanned}/${scan.users.reportedTotal} (${scan.users.pages}p), banks ${scan.banks.scanned}/${scan.banks.reportedTotal} (${scan.banks.pages}p)` +
       (scan.complete ? "" : "   *** INCOMPLETE ***"),
+    `source digest     ${scan.fingerprint}`,
     `expected          ${report.legacy.migratable.customers} customers, ${report.legacy.migratable.accounts} linked accounts`,
-    `postgres          ${report.postgres.customers} customers, ${report.postgres.accounts} linked accounts`,
+    `postgres          ${report.postgres.customers} customers, ${report.postgres.accounts} linked accounts (${report.postgres.isolation} snapshot)`,
     `not migratable    ${report.skippedBySource} source records`
   );
 

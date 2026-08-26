@@ -16,6 +16,8 @@ import {
   type LegacyUserDocument,
   type SourceScan,
 } from "./appwrite-source";
+import { withTransaction } from "../db/pool";
+import { MIGRATION_LOCK_KEY } from "./lock";
 import { planMigration, type SkipCode } from "./mapping";
 
 export type Drift = {
@@ -68,9 +70,22 @@ export type VerificationReport = {
       users: { scanned: number; reportedTotal: number; pages: number };
       banks: { scanned: number; reportedTotal: number; pages: number };
       complete: boolean;
+      /**
+       * Digest of the source this verification actually observed.
+       *
+       * A verification is a statement about one dataset at one moment. Carrying
+       * the digest is what lets an operator tie a green result to the backfill
+       * that produced it, instead of to whatever Appwrite happens to hold now.
+       */
+      fingerprint: string;
     };
   };
-  postgres: { customers: number; accounts: number };
+  postgres: {
+    customers: number;
+    accounts: number;
+    /** As reported by the server for the snapshot these counts came from. */
+    isolation: string;
+  };
   skippedBySource: number;
   drift: Drift[];
   ok: boolean;
@@ -100,15 +115,49 @@ export type VerificationReport = {
 export type VerifyDeps = {
   readUsers: () => Promise<SourceScan<LegacyUserDocument>>;
   readBanks: () => Promise<SourceScan<LegacyBankDocument>>;
-  listCustomers: () => Promise<BankingCustomerRow[]>;
-  listAccounts: () => Promise<LinkedAccountRow[]>;
+  /**
+   * Both PostgreSQL tables, read together.
+   *
+   * ONE function rather than two, deliberately. Reading customers and accounts
+   * as independent statements lets a concurrent backfill commit between them,
+   * producing a comparison of two different databases: accounts whose customer
+   * "does not exist", or customers whose accounts "are missing". The default
+   * implementation reads both inside a single REPEATABLE READ transaction that
+   * also waits on the migration advisory lock, so it never observes a backfill
+   * halfway through.
+   */
+  readPostgres: () => Promise<{
+    customers: BankingCustomerRow[];
+    accounts: LinkedAccountRow[];
+    /**
+     * The isolation level PostgreSQL reported for the read, not the one we
+     * intended. A label would survive someone removing the isolation option;
+     * asking the server is evidence.
+     */
+    isolation: string;
+  }>;
 };
 
 export const defaultVerifyDeps: VerifyDeps = {
   readUsers: readAllLegacyUsers,
   readBanks: readAllLegacyBanks,
-  listCustomers: listBankingCustomers,
-  listAccounts: listLinkedAccounts,
+  readPostgres: () =>
+    withTransaction(
+      async (client) => {
+        // Waits for any in-flight backfill to finish, so the snapshot below is
+        // taken between migrations rather than through one.
+        await client.query("SELECT pg_advisory_xact_lock($1)", [MIGRATION_LOCK_KEY]);
+        const { rows } = await client.query<{ level: string }>(
+          "SELECT current_setting('transaction_isolation') AS level"
+        );
+        return {
+          customers: await listBankingCustomers(client),
+          accounts: await listLinkedAccounts(client),
+          isolation: rows[0].level,
+        };
+      },
+      { isolation: "repeatable read" }
+    ),
 };
 
 /**
@@ -128,12 +177,13 @@ export async function verifyMigration(
   options: VerifyOptions = {}
 ): Promise<VerificationReport> {
   const acknowledged = new Set<string>(options.acknowledged ?? []);
-  const [userScan, bankScan, pgCustomers, pgAccounts] = await Promise.all([
+  const [userScan, bankScan, pg] = await Promise.all([
     deps.readUsers(),
     deps.readBanks(),
-    deps.listCustomers(),
-    deps.listAccounts(),
+    deps.readPostgres(),
   ]);
+  const pgCustomers = pg.customers;
+  const pgAccounts = pg.accounts;
 
   const users = userScan.documents;
   const banks = bankScan.documents;
@@ -286,9 +336,14 @@ export async function verifyMigration(
           pages: bankScan.pages,
         },
         complete: userScan.complete && bankScan.complete,
+        fingerprint: `${userScan.fingerprint}.${bankScan.fingerprint}`,
       },
     },
-    postgres: { customers: pgCustomers.length, accounts: pgAccounts.length },
+    postgres: {
+      customers: pgCustomers.length,
+      accounts: pgAccounts.length,
+      isolation: pg.isolation,
+    },
     scope: {
       verified: [
         "customer identity bridge (auth id <-> user document id)",
@@ -301,6 +356,7 @@ export async function verifyMigration(
         "provider metadata correctness (name, official name, mask, type, subtype)",
         "currency provenance beyond the schema CHECK",
         "anything requiring a live Plaid call",
+        "that Appwrite did not change while it was being read (it stays live)",
       ],
     },
     skippedBySource: expected.skipped.length,

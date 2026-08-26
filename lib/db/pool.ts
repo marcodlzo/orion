@@ -101,16 +101,29 @@ export async function query<T extends QueryResultRow = QueryResultRow>(
  * any thrown error, always release the client.
  */
 export async function withTransaction<T>(
-  fn: (client: PoolClient) => Promise<T>
+  fn: (client: PoolClient) => Promise<T>,
+  options: { isolation?: "read committed" | "repeatable read" } = {}
 ): Promise<T> {
   const client = await getPool().connect().catch((error) => {
     // Never started. No BEGIN was issued and nothing can have been written.
     throw toDatabaseError(error);
   });
 
+  // Set when the connection's state can no longer be trusted, so it is
+  // destroyed instead of being handed to the next caller mid-transaction.
+  let suspect = false;
+
   try {
     try {
-      await client.query("BEGIN");
+      // REPEATABLE READ gives every statement in the transaction one consistent
+      // snapshot. A reader that needs several tables to agree with each other
+      // must ask for it: at READ COMMITTED each statement sees a newer database
+      // than the last, so a concurrent writer can tear the result.
+      await client.query(
+        options.isolation === "repeatable read"
+          ? "BEGIN ISOLATION LEVEL REPEATABLE READ"
+          : "BEGIN"
+      );
     } catch (error) {
       throw toDatabaseError(error);
     }
@@ -119,10 +132,14 @@ export async function withTransaction<T>(
     try {
       result = await fn(client);
     } catch (callbackError) {
+      let rollbackFailed = false;
       await client.query("ROLLBACK").catch(() => {
         // The connection is already broken. PostgreSQL rolls back a severed
-        // session on its own, so the transaction is still undone.
+        // session on its own, so the transaction is still undone — but this
+        // client must not go back into the pool in an unknown state.
+        rollbackFailed = true;
       });
+      if (rollbackFailed) suspect = true;
       // RETHROWN UNCHANGED, deliberately.
       //
       // This used to be `throw toDatabaseError(error)`, which turned a
@@ -142,12 +159,14 @@ export async function withTransaction<T>(
       // committed and the acknowledgement been lost on the way back. Rolling
       // back afterwards cannot undo it, and claiming "nothing was written"
       // would be a statement nobody is in a position to make.
+      // The session's state is no longer known either.
+      suspect = true;
       throw new TransactionOutcomeUnknownError({ cause: error });
     }
 
     return result;
   } finally {
-    client.release();
+    client.release(suspect ? new Error("connection state is unknown") : undefined);
   }
 }
 
