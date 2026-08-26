@@ -129,23 +129,56 @@ export async function withLockedSnapshot<T>(
   try {
     // Session level, BEFORE BEGIN. Blocks until any in-flight migration
     // holding the same key has committed or rolled back.
-    await client.query("SELECT pg_advisory_lock($1)", [lockKey]);
+    try {
+      await client.query("SELECT pg_advisory_lock($1)", [lockKey]);
+    } catch (error) {
+      throw toDatabaseError(error);
+    }
 
     try {
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
-      // fn's first read is the transaction's first statement, so the snapshot
-      // begins here — after the lock.
-      const result = await fn(client);
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => {
+      try {
+        // READ ONLY is enforced by PostgreSQL, not by convention. This helper
+        // exists for verification, which must never write; without it a future
+        // caller could quietly issue an INSERT here and the only thing stopping
+        // them would be that nobody had yet.
+        await client.query(
+          "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
+        );
+      } catch (error) {
+        throw toDatabaseError(error);
+      }
+
+      let result: T;
+      try {
+        // fn's first read is the transaction's first statement, so the snapshot
+        // begins here — after the lock.
+        result = await fn(client);
+      } catch (callbackError) {
+        await client.query("ROLLBACK").catch(() => {
+          suspect = true;
+        });
+        // RETHROWN UNCHANGED. This is the same mistake withTransaction used to
+        // make, reintroduced here: running toDatabaseError over everything the
+        // callback threw turned a TypeError into a QueryFailedError, so a
+        // programming defect arrived at the caller wearing a database error's
+        // clothes. Only the lock, BEGIN and COMMIT are this layer's to classify.
+        throw callbackError;
+      }
+
+      try {
+        await client.query("COMMIT");
+      } catch (error) {
+        // A read-only transaction has nothing to lose on a failed COMMIT, so
+        // this is an ordinary database failure rather than an unknown outcome.
         suspect = true;
-      });
-      throw toDatabaseError(error);
+        throw toDatabaseError(error);
+      }
+
+      return result;
     } finally {
       // Must happen even on failure: a session lock left held would block every
-      // later migration until this connection is closed.
+      // later migration until this connection is closed — and the connection
+      // goes back into the pool.
       await client.query("SELECT pg_advisory_unlock($1)", [lockKey]).catch(() => {
         suspect = true;
       });

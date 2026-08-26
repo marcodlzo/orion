@@ -1,4 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+// A separate Pool means a separate backend, which is what makes the advisory
+// lock probes below meaningful. Test files are outside the `pg`-stays-in-lib/db
+// architecture rule for exactly this kind of check.
+import { Pool } from "pg";
 
 import {
   closePool,
@@ -9,6 +13,7 @@ import {
 } from "../db/pool";
 import { requireTestDatabase } from "../db/test-database";
 import {
+  DatabaseError,
   DatabaseUnavailableError,
   IdentityConflictError,
   TransactionOutcomeUnknownError,
@@ -124,6 +129,50 @@ function realDeps(
     upsertAccount: upsertLinkedAccount,
   };
 }
+
+/**
+ * Probe from a GUARANTEED DIFFERENT session.
+ *
+ * PostgreSQL advisory locks are reentrant per session: the holder can take
+ * the same key again and succeed. The shared pool's query() may hand back the
+ * very connection that leaked the lock, in which case pg_try_advisory_lock
+ * returns true and a leaked lock looks free. A separate Pool is a separate
+ * backend, so this cannot happen.
+ */
+async function lockIsFreeElsewhere(key: number): Promise<boolean> {
+  const probe = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    max: 1,
+  });
+  try {
+    // GUARDS THE GUARD. If this probe ran on the application pool, every lock
+    // assertion built on it would be meaningless: advisory locks are reentrant
+    // per session, so a holder retaking its own key succeeds and a leaked lock
+    // looks free.
+    //
+    // Structural rather than observational, deliberately. Comparing backend
+    // PIDs against "the pool" is unreliable — the pool is a SET of sessions, so
+    // a probe wrongly running on it can still draw a different connection and
+    // pass by luck. A dedicated Pool is a dedicated backend by construction.
+    expect(probe, "advisory-lock probe must be its own connection pool").toBeInstanceOf(
+      Pool
+    );
+    expect(probe).not.toBe(getPool());
+
+    const { rows } = await probe.query<{ locked: boolean }>(
+      "SELECT pg_try_advisory_lock($1) AS locked",
+      [key]
+    );
+    if (rows[0].locked) {
+      await probe.query("SELECT pg_advisory_unlock($1)", [key]);
+    }
+    return rows[0].locked;
+  } finally {
+    // Ends the session, so nothing this probe took can outlive it.
+    await probe.end();
+  }
+}
+
 
 const snapshot = async () => ({
   customers: await listBankingCustomers(),
@@ -1234,18 +1283,14 @@ describe("verifier sees what it waited for", () => {
     }
   });
 
+
   it("does not leave the advisory lock held after reading", async () => {
     await defaultVerifyDeps.readPostgres();
 
     // A session-level lock outlives its transaction. Failing to release it
     // would block every later migration until that connection closed — and the
     // connection goes back into the pool.
-    const { rows } = await query<{ locked: boolean }>(
-      "SELECT pg_try_advisory_lock($1) AS locked",
-      [MIGRATION_LOCK_KEY]
-    );
-    expect(rows[0].locked).toBe(true);
-    await query("SELECT pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]);
+    expect(await lockIsFreeElsewhere(MIGRATION_LOCK_KEY)).toBe(true);
   });
 
   it("releases the lock even when the read fails", async () => {
@@ -1255,11 +1300,147 @@ describe("verifier sees what it waited for", () => {
       })
     ).rejects.toThrow();
 
-    const { rows } = await query<{ locked: boolean }>(
-      "SELECT pg_try_advisory_lock($1) AS locked",
-      [MIGRATION_LOCK_KEY]
+    expect(await lockIsFreeElsewhere(MIGRATION_LOCK_KEY)).toBe(true);
+  });
+});
+
+/**
+ * withLockedSnapshot is READ ONLY, and PostgreSQL is what enforces it.
+ *
+ * The helper exists for verification, which must never write. "No caller
+ * writes" is a fact about today's callers; READ ONLY is a fact about the
+ * transaction.
+ */
+describe("withLockedSnapshot — enforced read-only", () => {
+  it("reports transaction_read_only as on", async () => {
+    const setting = await withLockedSnapshot(MIGRATION_LOCK_KEY, async (client) => {
+      const { rows } = await client.query<{ ro: string }>(
+        "SELECT current_setting('transaction_read_only') AS ro"
+      );
+      return rows[0].ro;
+    });
+
+    expect(setting).toBe("on");
+  });
+
+  it("still reports repeatable read", async () => {
+    const level = await withLockedSnapshot(MIGRATION_LOCK_KEY, async (client) => {
+      const { rows } = await client.query<{ level: string }>(
+        "SELECT current_setting('transaction_isolation') AS level"
+      );
+      return rows[0].level;
+    });
+
+    expect(level).toBe("repeatable read");
+  });
+
+  it("REJECTS an INSERT with SQLSTATE 25006", async () => {
+    const error = await withLockedSnapshot(MIGRATION_LOCK_KEY, async (client) => {
+      await client.query(
+        `INSERT INTO banking_customers (appwrite_auth_id, appwrite_user_document_id)
+         VALUES ('auth-readonly-probe', 'doc-readonly-probe')`
+      );
+      return null;
+    }).then(
+      () => null,
+      (e: unknown) => e as { code?: string; sqlState?: string }
     );
-    expect(rows[0].locked).toBe(true);
-    await query("SELECT pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]);
+
+    expect(error).not.toBeNull();
+    // 25006 is read_only_sql_transaction, raised by the server.
+    expect(error!.sqlState ?? error!.code).toBe("25006");
+  });
+
+  it("leaves no durable row behind after the rejected write", async () => {
+    await withLockedSnapshot(MIGRATION_LOCK_KEY, async (client) => {
+      await client.query(
+        `INSERT INTO banking_customers (appwrite_auth_id, appwrite_user_document_id)
+         VALUES ('auth-readonly-probe', 'doc-readonly-probe')`
+      );
+      return null;
+    }).catch(() => undefined);
+
+    const { rows } = await query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM banking_customers WHERE appwrite_auth_id = $1",
+      ["auth-readonly-probe"]
+    );
+    expect(Number(rows[0].count)).toBe(0);
+  });
+
+  it("rejects an UPDATE too, not only inserts", async () => {
+    await runBackfill({ dryRun: false }, realDeps([user(1)], [bank(1, 1)]));
+
+    const error = await withLockedSnapshot(MIGRATION_LOCK_KEY, async (client) => {
+      await client.query("UPDATE banking_customers SET appwrite_auth_id = 'changed'");
+      return null;
+    }).then(
+      () => null,
+      (e: unknown) => e as { sqlState?: string; code?: string }
+    );
+
+    expect(error!.sqlState ?? error!.code).toBe("25006");
+
+    const after = await snapshot();
+    expect(after.customers[0].appwrite_auth_id).toBe("auth-1");
+  });
+
+  it("releases the lock after a read-only violation", async () => {
+    await withLockedSnapshot(MIGRATION_LOCK_KEY, async (client) => {
+      await client.query(
+        `INSERT INTO banking_customers (appwrite_auth_id, appwrite_user_document_id)
+         VALUES ('auth-x', 'doc-x')`
+      );
+      return null;
+    }).catch(() => undefined);
+
+    expect(await lockIsFreeElsewhere(MIGRATION_LOCK_KEY)).toBe(true);
+  });
+});
+
+describe("withLockedSnapshot — callback errors are not reclassified", () => {
+  it("propagates a TypeError unchanged", async () => {
+    // The same defect withTransaction had, reintroduced in this helper:
+    // toDatabaseError over everything the callback threw turned a programming
+    // defect into a QueryFailedError.
+    await expect(
+      withLockedSnapshot(MIGRATION_LOCK_KEY, async () => {
+        throw new TypeError("programming defect");
+      })
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("propagates a plain Error unchanged", async () => {
+    const thrown = await withLockedSnapshot(MIGRATION_LOCK_KEY, async () => {
+      throw new Error("callback said no");
+    }).then(
+      () => null,
+      (e: unknown) => e as Error
+    );
+
+    expect(thrown).not.toBeInstanceOf(DatabaseError);
+    expect(thrown!.message).toBe("callback said no");
+  });
+
+  it("still classifies a genuine database failure from inside the callback", async () => {
+    // A real SQL error surfaces through the repositories as a DatabaseError,
+    // and must keep doing so — the fix must not make everything opaque.
+    const thrown = await withLockedSnapshot(MIGRATION_LOCK_KEY, async (client) => {
+      await client.query("SELECT * FROM a_table_that_does_not_exist");
+      return null;
+    }).then(
+      () => null,
+      (e: unknown) => e as { code?: string }
+    );
+
+    // 42P01 is undefined_table, straight from the server.
+    expect(thrown!.code).toBe("42P01");
+  });
+
+  it("releases the lock when the callback throws a programming defect", async () => {
+    await withLockedSnapshot(MIGRATION_LOCK_KEY, async () => {
+      throw new TypeError("programming defect");
+    }).catch(() => undefined);
+
+    expect(await lockIsFreeElsewhere(MIGRATION_LOCK_KEY)).toBe(true);
   });
 });
