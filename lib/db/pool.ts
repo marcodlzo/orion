@@ -132,6 +132,11 @@ export async function withLockedSnapshot<T>(
     try {
       await client.query("SELECT pg_advisory_lock($1)", [lockKey]);
     } catch (error) {
+      // The server may have granted the session lock and only its
+      // acknowledgement was lost. Returning this client to the pool would
+      // strand that lock on a reusable session, so a failed acquisition makes
+      // the connection unsafe regardless of the driver's error classification.
+      suspect = true;
       throw toDatabaseError(error);
     }
 
@@ -145,6 +150,10 @@ export async function withLockedSnapshot<T>(
           "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
         );
       } catch (error) {
+        // A rejected BEGIN acknowledgement does not prove BEGIN was not
+        // accepted. Even if the unlock below succeeds, the session may still
+        // be inside a transaction and must not be reused.
+        suspect = true;
         throw toDatabaseError(error);
       }
 
@@ -222,6 +231,11 @@ export async function withTransaction<T>(
           : "BEGIN"
       );
     } catch (error) {
+      // BEGIN may have reached PostgreSQL before the acknowledgement was lost.
+      // There is no safe statement we can issue to distinguish that from a
+      // failure before BEGIN, so destroy the client instead of returning a
+      // possibly open transaction to the pool.
+      suspect = true;
       throw toDatabaseError(error);
     }
 

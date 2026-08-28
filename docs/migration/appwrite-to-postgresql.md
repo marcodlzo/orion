@@ -285,6 +285,7 @@ backfill agrees with itself.
 |---|---|
 | `missing-customer` / `missing-account` | In Appwrite, absent from PostgreSQL. Re-run the backfill. |
 | `orphan-customer` / `orphan-account` | In PostgreSQL, no live source. Usually deleted in Appwrite after the backfill. |
+| `duplicate-customer` / `duplicate-account` | Multiple PostgreSQL rows claim one identity or linkage bridge. The detail gives the row count and IDs. **Investigate before cutover** — the verifier does not rely on schema constraints alone. |
 | `mismatched-customer` / `mismatched-account` | Present on both sides but bridged to the wrong record. **Investigate before re-running** — this is the shape a mapping bug takes. |
 | `unenriched-account` | Migrated with placeholder metadata. Re-run once the provider is reachable. |
 
@@ -293,9 +294,10 @@ inform one.
 
 ### What a green verification does and does not prove
 
-**Proved:** every customer and account link is present, correctly bridged, not
-duplicated; the source was read completely; and no source record was silently
-dropped.
+**Proved:** every customer and account link is present, correctly bridged, and
+unique in both directions: auth id and user-document id for customers; natural
+key and non-null legacy bank-document id for accounts. The source was read
+completely, and no source record was silently dropped.
 
 **Not proved:** that Appwrite held still while it was being read — it stays
 live throughout, so a verification is a statement about the dataset it observed,

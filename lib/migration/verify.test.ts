@@ -235,7 +235,11 @@ describe("verifyMigration — orphans", () => {
       deps({
         accounts: async () => [
           accountRow(),
-          accountRow({ id: "uuid-ghost", external_account_id: "acct-deleted" }),
+          accountRow({
+            id: "uuid-ghost",
+            external_account_id: "acct-deleted",
+            legacy_appwrite_bank_document_id: "bank-doc-deleted",
+          }),
         ],
       })
     );
@@ -316,6 +320,64 @@ describe("verifyMigration — mismatches", () => {
     );
 
     expect(report.drift[0].detail).toContain("nothing");
+  });
+});
+
+describe("verifyMigration — duplicate PostgreSQL bridges", () => {
+  it("reports every duplicated customer bridge with its multiplicity", async () => {
+    const report = await verifyMigration(
+      deps({
+        customers: async () => [
+          customerRow({ id: "uuid-customer-3" }),
+          customerRow({ id: "uuid-customer-1" }),
+          customerRow({ id: "uuid-customer-2" }),
+        ],
+      })
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.drift).toEqual([
+      {
+        category: "duplicate-customer",
+        id: "auth auth-1",
+        detail:
+          "3 PostgreSQL rows share this bridge: uuid-customer-1, uuid-customer-2, uuid-customer-3",
+      },
+      {
+        category: "duplicate-customer",
+        id: "user document user-doc-1",
+        detail:
+          "3 PostgreSQL rows share this bridge: uuid-customer-1, uuid-customer-2, uuid-customer-3",
+      },
+    ]);
+  });
+
+  it("reports every duplicated account bridge with its multiplicity", async () => {
+    const report = await verifyMigration(
+      deps({
+        accounts: async () => [
+          accountRow({ id: "uuid-account-3" }),
+          accountRow({ id: "uuid-account-1" }),
+          accountRow({ id: "uuid-account-2" }),
+        ],
+      })
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.drift).toEqual([
+      {
+        category: "duplicate-account",
+        id: "natural key (uuid-customer-1, plaid, plaid-account-1)",
+        detail:
+          "3 PostgreSQL rows share this bridge: uuid-account-1, uuid-account-2, uuid-account-3",
+      },
+      {
+        category: "duplicate-account",
+        id: "legacy bank document bank-doc-1",
+        detail:
+          "3 PostgreSQL rows share this bridge: uuid-account-1, uuid-account-2, uuid-account-3",
+      },
+    ]);
   });
 });
 
@@ -531,5 +593,130 @@ describe("verifyMigration — independence, stated concretely", () => {
     );
 
     expect(report.drift.map((d) => d.category)).toContain("mismatched-customer");
+  });
+});
+
+/**
+ * THE VERIFIER'S NATURAL KEY MUST MATCH THE SCHEMA'S UNIQUE INDEX.
+ *
+ * The index is `(customer_id, provider, external_account_id)`. If the verifier
+ * keys on anything narrower, its "duplicate" and "orphan" conclusions describe a
+ * different database than the one PostgreSQL is enforcing.
+ *
+ * `provider` currently has a CHECK of 'plaid', so no fixture distinguishes the
+ * two keyings by accident — which is precisely why dropping `provider` from the
+ * key left every other test green.
+ */
+describe("verifyMigration — natural key composition", () => {
+  it("does NOT treat two providers on one account as a duplicate", () => {
+    return verifyMigration(
+      deps({
+        accounts: async () => [
+          accountRow({ id: "uuid-plaid" }),
+          accountRow({
+            id: "uuid-other",
+            provider: "dwolla",
+            legacy_appwrite_bank_document_id: "bank-doc-other",
+          }),
+        ],
+      })
+    ).then((report) => {
+      // Same customer, same external account, different provider — three
+      // columns, so two distinct rows under the schema's index.
+      const duplicates = report.drift.filter((d) => d.category === "duplicate-account");
+      expect(duplicates).toEqual([]);
+    });
+  });
+
+  it("still reports a genuine duplicate within one provider", async () => {
+    const report = await verifyMigration(
+      deps({
+        accounts: async () => [
+          accountRow({ id: "uuid-a" }),
+          accountRow({ id: "uuid-b", legacy_appwrite_bank_document_id: "bank-doc-b" }),
+        ],
+      })
+    );
+
+    const duplicates = report.drift.filter((d) => d.category === "duplicate-account");
+    expect(duplicates).toHaveLength(1);
+    expect(duplicates[0].id).toContain("plaid");
+  });
+
+  it("names the provider in the duplicate's natural key", async () => {
+    const report = await verifyMigration(
+      deps({
+        accounts: async () => [
+          accountRow({ id: "uuid-a" }),
+          accountRow({ id: "uuid-b", legacy_appwrite_bank_document_id: "bank-doc-b" }),
+        ],
+      })
+    );
+
+    // An operator reading this has to be able to find the rows. Omitting the
+    // provider would make the identifier ambiguous the moment a second one
+    // exists.
+    expect(report.drift.find((d) => d.category === "duplicate-account")!.id).toBe(
+      "natural key (uuid-customer-1, plaid, plaid-account-1)"
+    );
+  });
+});
+
+/**
+ * ORPHANS ARE COUNTED PER ROW, NOT PER KEY.
+ *
+ * The orphan scan walks every PostgreSQL row. Walking the deduplicated index
+ * instead would report N rows sharing a key as a single orphan, so an operator
+ * cleaning up would delete one row and believe the drift was resolved.
+ */
+describe("verifyMigration — orphan multiplicity", () => {
+  it("reports every orphaned row, not one per natural key", async () => {
+    const report = await verifyMigration(
+      deps({
+        accounts: async () => [
+          accountRow(),
+          accountRow({
+            id: "uuid-orphan-1",
+            external_account_id: "acct-gone",
+            legacy_appwrite_bank_document_id: "bank-gone-1",
+          }),
+          accountRow({
+            id: "uuid-orphan-2",
+            external_account_id: "acct-gone",
+            legacy_appwrite_bank_document_id: "bank-gone-2",
+          }),
+        ],
+      })
+    );
+
+    const orphans = report.drift.filter((d) => d.category === "orphan-account");
+    expect(orphans).toHaveLength(2);
+    expect(orphans.map((o) => o.id).sort()).toEqual(["uuid-orphan-1", "uuid-orphan-2"]);
+  });
+
+  it("reports the shared key as a duplicate as well", async () => {
+    const report = await verifyMigration(
+      deps({
+        accounts: async () => [
+          accountRow(),
+          accountRow({
+            id: "uuid-orphan-1",
+            external_account_id: "acct-gone",
+            legacy_appwrite_bank_document_id: "bank-gone-1",
+          }),
+          accountRow({
+            id: "uuid-orphan-2",
+            external_account_id: "acct-gone",
+            legacy_appwrite_bank_document_id: "bank-gone-2",
+          }),
+        ],
+      })
+    );
+
+    // Both facts are true and an operator needs both: two rows to remove, and
+    // the reason they collided.
+    expect(
+      report.drift.filter((d) => d.category === "duplicate-account")
+    ).toHaveLength(1);
   });
 });

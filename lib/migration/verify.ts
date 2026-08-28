@@ -26,6 +26,8 @@ export type Drift = {
     | "missing-account"
     | "orphan-customer"
     | "orphan-account"
+    | "duplicate-customer"
+    | "duplicate-account"
     | "mismatched-customer"
     | "mismatched-account"
     | "unenriched-account"
@@ -160,6 +162,40 @@ export const defaultVerifyDeps: VerifyDeps = {
     }),
 };
 
+/** Group rows without discarding multiplicity, then choose a stable representative. */
+function indexRows<T extends { id: string }>(
+  rows: readonly T[],
+  keyOf: (row: T) => string
+): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const row of rows) {
+    const key = keyOf(row);
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+  }
+  for (const group of Array.from(groups.values())) {
+    group.sort((a, b) => a.id.localeCompare(b.id));
+  }
+  return groups;
+}
+
+function firstRows<T>(groups: ReadonlyMap<string, readonly T[]>): Map<string, T> {
+  return new Map(
+    Array.from(groups, ([key, rows]) => {
+      const first = rows[0];
+      if (!first) throw new Error(`empty verification index for ${key}`);
+      return [key, first];
+    })
+  );
+}
+
+function duplicateDetail(rows: readonly { id: string }[]): string {
+  return `${rows.length} PostgreSQL rows share this bridge: ${rows
+    .map((row) => row.id)
+    .join(", ")}`;
+}
+
 /**
  * Compare the legacy dataset against PostgreSQL and report every difference.
  *
@@ -220,7 +256,31 @@ export async function verifyMigration(
   }
 
   // --- customers ----------------------------------------------------------
-  const pgByAuthId = new Map(pgCustomers.map((c) => [c.appwrite_auth_id, c]));
+  const customersByAuthId = indexRows(pgCustomers, (c) => c.appwrite_auth_id);
+  const customersByDocumentId = indexRows(
+    pgCustomers,
+    (c) => c.appwrite_user_document_id
+  );
+  for (const [authId, rows] of Array.from(customersByAuthId.entries())) {
+    if (rows.length > 1) {
+      drift.push({
+        category: "duplicate-customer",
+        id: `auth ${authId}`,
+        detail: duplicateDetail(rows),
+      });
+    }
+  }
+  for (const [documentId, rows] of Array.from(customersByDocumentId.entries())) {
+    if (rows.length > 1) {
+      drift.push({
+        category: "duplicate-customer",
+        id: `user document ${documentId}`,
+        detail: duplicateDetail(rows),
+      });
+    }
+  }
+
+  const pgByAuthId = firstRows(customersByAuthId);
   const expectedAuthIds = new Set(expected.customers.map((c) => c.appwriteAuthId));
 
   for (const customer of expected.customers) {
@@ -257,11 +317,46 @@ export async function verifyMigration(
 
   // --- accounts -----------------------------------------------------------
   const customerIdByDocument = new Map(
-    pgCustomers.map((c) => [c.appwrite_user_document_id, c.id])
+    Array.from(firstRows(customersByDocumentId), ([documentId, customer]) => [
+      documentId,
+      customer.id,
+    ])
   );
-  const pgByNaturalKey = new Map(
-    pgAccounts.map((a) => [`${a.customer_id}::${a.external_account_id}`, a])
+  const naturalAccountKey = (account: {
+    customer_id: string;
+    provider: string;
+    external_account_id: string;
+  }): string =>
+    JSON.stringify([account.customer_id, account.provider, account.external_account_id]);
+  const accountsByNaturalKey = indexRows(pgAccounts, naturalAccountKey);
+  const accountsByLegacyDocumentId = indexRows(
+    pgAccounts.filter(
+      (account): account is LinkedAccountRow & { legacy_appwrite_bank_document_id: string } =>
+        account.legacy_appwrite_bank_document_id !== null
+    ),
+    (account) => account.legacy_appwrite_bank_document_id
   );
+  for (const rows of Array.from(accountsByNaturalKey.values())) {
+    if (rows.length > 1) {
+      const account = rows[0];
+      drift.push({
+        category: "duplicate-account",
+        id: `natural key (${account.customer_id}, ${account.provider}, ${account.external_account_id})`,
+        detail: duplicateDetail(rows),
+      });
+    }
+  }
+  for (const [documentId, rows] of Array.from(accountsByLegacyDocumentId.entries())) {
+    if (rows.length > 1) {
+      drift.push({
+        category: "duplicate-account",
+        id: `legacy bank document ${documentId}`,
+        detail: duplicateDetail(rows),
+      });
+    }
+  }
+
+  const pgByNaturalKey = firstRows(accountsByNaturalKey);
   const expectedKeys = new Set<string>();
 
   for (const account of expected.accounts) {
@@ -275,7 +370,11 @@ export async function verifyMigration(
       continue;
     }
 
-    const key = `${customerId}::${account.externalAccountId}`;
+    const key = naturalAccountKey({
+      customer_id: customerId,
+      provider: account.provider,
+      external_account_id: account.externalAccountId,
+    });
     expectedKeys.add(key);
     const row = pgByNaturalKey.get(key);
 
@@ -305,7 +404,8 @@ export async function verifyMigration(
     }
   }
 
-  for (const [key, row] of Array.from(pgByNaturalKey.entries())) {
+  for (const row of pgAccounts) {
+    const key = naturalAccountKey(row);
     if (!expectedKeys.has(key)) {
       drift.push({
         category: "orphan-account",
