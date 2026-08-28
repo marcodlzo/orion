@@ -961,21 +961,75 @@ describe("migration tooling stays out of the request path", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("keeps Appwrite as the runtime source: no request path imports lib/db", () => {
-    // Phase 6B populates PostgreSQL but does not cut over to it. If a server
-    // action or a page started reading lib/db, the cutover would have happened
-    // silently.
+  /**
+   * THE ONE PERMITTED CROSSING.
+   *
+   * Phase 6B kept PostgreSQL entirely out of every request path. Phase 7 opens
+   * exactly one route into it — transfers need a durable idempotency claim, and
+   * Appwrite cannot give one — and this list is the whole of it.
+   *
+   * An ALLOWLIST, not a deleted guard. Everything else in lib/db is still
+   * unreachable from a request, and a second crossing fails this test. That is
+   * the point: the boundary moved once, deliberately, and did not dissolve.
+   *
+   * `pool.ts` and `errors.ts` appear because the transfers repository imports
+   * them; reaching the pool through a repository is the intended shape.
+   * `migration/` is NOT here and never will be — those reads are unscoped.
+   */
+  const RUNTIME_DB_ALLOWLIST = [
+    "lib/db/repositories/transfers.repository.ts",
+    "lib/db/repositories/banking-customers.repository.ts",
+    "lib/db/pool.ts",
+    "lib/db/errors.ts",
+  ];
+
+  it("only the transfer path reaches lib/db, and only these modules", () => {
     const requestEntries = Array.from(graph.values())
       .filter((m) => m.isAction || m.isClient || m.file.startsWith("app/"))
       .map((m) => m.file);
 
     const reachable = closure(requestEntries);
-    const dbModules = Array.from(graph.keys()).filter(
-      (f) => f.startsWith("lib/db/") && !f.endsWith("errors.ts")
+    const dbModules = Array.from(graph.keys()).filter((f) =>
+      f.startsWith("lib/db/")
+    );
+    expect(dbModules.length).toBeGreaterThan(0);
+
+    const crossings = dbModules.filter((f) => reachable.has(f)).sort();
+    expect(crossings).toEqual([...RUNTIME_DB_ALLOWLIST].sort());
+  });
+
+  it("no request path reaches the migration tooling or the operator repositories", () => {
+    // The parts of lib/db that remain operator-only. linked_accounts is written
+    // by the backfill and read by the verifier; nothing serving a request has
+    // any business touching it yet.
+    const requestEntries = Array.from(graph.values())
+      .filter((m) => m.isAction || m.isClient || m.file.startsWith("app/"))
+      .map((m) => m.file);
+
+    const reachable = closure(requestEntries);
+    const forbidden = Array.from(graph.keys()).filter(
+      (f) =>
+        f.startsWith("lib/migration/") ||
+        f === "lib/db/repositories/linked-accounts.repository.ts" ||
+        f === "lib/db/test-database.ts" ||
+        f === "lib/db/health.ts"
     );
 
-    expect(dbModules.length).toBeGreaterThan(0);
-    expect(dbModules.filter((f) => reachable.has(f))).toEqual([]);
+    expect(forbidden.length).toBeGreaterThan(0);
+    expect(forbidden.filter((f) => reachable.has(f))).toEqual([]);
+  });
+
+  it("the crossing is the transfer service, not a component or an action body", () => {
+    // Where the boundary is crossed matters as much as that it is. A client
+    // component importing a repository directly would put a database call one
+    // refactor away from the browser bundle.
+    const importers = Array.from(graph.values())
+      .filter((m) =>
+        m.imports.includes("lib/db/repositories/transfers.repository.ts")
+      )
+      .map((m) => m.file);
+
+    expect(importers).toEqual(["lib/services/transfers.service.ts"]);
   });
 
   it("every migration module that performs I/O declares server-only", () => {

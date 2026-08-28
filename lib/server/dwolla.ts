@@ -74,11 +74,25 @@ export function toProviderAmount(money: Money): string {
  * a tracked defect for the idempotency milestone and is NOT solved by moving
  * the call server-side.
  */
+/**
+ * Submit a transfer to Dwolla.
+ *
+ * The idempotency key is sent as `Idempotency-Key`, which is what makes a
+ * retry safe at the PROVIDER: Dwolla recognises a repeated key and returns the
+ * original transfer rather than creating a second one. Our own row-level claim
+ * stops us calling twice on the happy path; this header is what protects the
+ * case where we called, never heard back, and called again.
+ *
+ * Both halves are required. A local claim alone cannot prevent a duplicate that
+ * Dwolla already accepted, and the header alone cannot tell us what happened.
+ */
 export async function createDwollaTransfer(input: {
   sourceFundingSourceUrl: string;
   destinationFundingSourceUrl: string;
   /** Exact minor units. Serialised to Dwolla's format by this adapter. */
   amount: Money;
+  /** Sent on every attempt, including retries, unchanged. */
+  idempotencyKey: string;
 }): Promise<{ transferUrl: string | null; transferId: string | null }> {
   const requestBody = {
     _links: {
@@ -91,7 +105,9 @@ export async function createDwollaTransfer(input: {
     },
   };
 
-  const response = await dwollaClient.post("transfers", requestBody);
+  const response = await dwollaClient.post("transfers", requestBody, {
+    "Idempotency-Key": input.idempotencyKey,
+  });
   const transferUrl = response.headers.get("location") ?? null;
   const transferId = transferUrl ? transferUrl.split("/").pop() ?? null : null;
 

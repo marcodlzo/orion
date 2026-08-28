@@ -56,6 +56,8 @@ regressed. Nothing here is claimed on the strength of a code reading alone.
 | Bank-linking trusted a client-supplied user object | `58d4dac` | The action derives the actor from the session and ignores any caller-supplied identity |
 | SSN and date of birth stored in plaintext and serialized into the RSC payload | `ca68d00` | Both are destructured out before persistence and excluded from the Actor and every DTO. `lib/actions/data-minimization.test.ts`, `lib/dto/dto.test.ts` |
 | Database test suites could truncate the development database | `3af095b` | `TEST_DATABASE_URL` is required with no fallback to `DATABASE_URL`, refused when both resolve to the same database, and refused when the name does not end in `_test`. `lib/db/test-database.test.ts` |
+| No idempotency — a retry, a second tab or a replayed request sent two transfers | Phase 7 | A client-generated key is claimed durably **before** the provider is called, and travels with the request so Dwolla returns the original transfer rather than creating a second. Replay is asserted by re-issuing the request and checking one financial effect, never by observing that a key row exists. `transfers.db.test.ts`, `transfer.test.ts` |
+| The Dwolla transfer reference was discarded, making reconciliation impossible | Phase 7 | Recorded on the transfer row, unique, and never overwritten once set. A response with no reference raises rather than inventing a placeholder. |
 
 The DTO tests are allowlist-based and run against a serialized payload rather
 than checking fields one at a time — a per-field assertion would keep passing
@@ -68,8 +70,7 @@ They are real, and this application should not be exposed to untrusted users.
 
 | Finding | Severity | Milestone |
 |---|---|---|
-| No idempotency — a double-click sends two transfers | High | 6 |
-| No ledger; balances read live from the provider | High | 5 |
+| No ledger; balances read live from the provider | High | 6 |
 | Provider acceptance treated as settlement | High | 7 |
 | `transactionsSync` called without a cursor; results overwritten each page | High | 10 |
 | No rate limiting on authentication or money movement | Medium | 2 |
@@ -83,8 +84,9 @@ document store. This is why the PostgreSQL migration does **not** copy them —
 and why it cannot be completed until this is fixed. It has no milestone yet,
 which is itself worth recording: it currently blocks the runtime cutover.
 
-`initiateTransfer` documents its own lack of idempotency in the source, at the
-endpoint, so nobody has to read this file to find out.
+`initiateTransfer` is now idempotent. PostgreSQL holds the claim, which makes it
+the first table a request path writes to — a boundary opened deliberately for
+this one route and pinned by an allowlist, not removed.
 
 ## The PostgreSQL migration
 
@@ -106,8 +108,14 @@ Security-relevant properties, each enforced by a test rather than a convention:
 - **The legacy reader is unscoped, and contained.** It reads every user and every
   bank document, because a migration has no current user. An import-boundary
   test proves no server action, client component, `app/` page or route, or
-  application repository reaches it at any depth. The same test proves no
-  request path reaches `lib/db`, so a runtime cutover cannot happen silently.
+  application repository reaches it at any depth — and that remains absolute.
+
+  `lib/db` is no longer absolutely unreachable: the idempotency milestone opened
+  ONE route into it, for the transfer claim. That crossing is an explicit
+  allowlist naming four modules, asserted by exact equality, with a separate
+  test pinning the crossing point to the transfer service. A second crossing,
+  or any reach into the migration tooling or the operator repositories, fails
+  the suite. The boundary moved once, deliberately; it did not dissolve.
 - **Secrets are kept out of reports and errors.** Failure reasons carry a
   classification (`name / SQLSTATE / constraint`), never the driver's message,
   because a constraint violation quotes the offending row and a Plaid error

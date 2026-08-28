@@ -92,8 +92,8 @@ enabled, which is how five type errors shipped.
 | 2 | Authorization foundation — server-resolved identity, ownership checks, DTO boundary | done |
 | 3 | Money primitives — integer minor units | done |
 | 4 | PostgreSQL introduction — schema, migrations, backfill, verifier | done |
-| 5 | Idempotency and durable transfer records | next |
-| 6 | Immutable double-entry ledger | |
+| 5 | Idempotency and durable transfer records | done |
+| 6 | Immutable double-entry ledger | next |
 | 7 | Transfer state machine and provider webhooks | |
 | 8 | Holds, available vs ledger balance, concurrency safety | |
 | 9 | Reconciliation, audit trail, reversals | |
@@ -112,8 +112,18 @@ transaction that rolls back, and an independent verifier. PostgreSQL is
 Appwrite, and an import-boundary test proves a cutover cannot happen by
 accident. Doing it on purpose is blocked on encrypting provider credentials.
 
+**Milestone 5** made `initiateTransfer` idempotent. A client-generated key is
+claimed in PostgreSQL and committed *before* Dwolla is called, so a process that
+dies mid-flight leaves evidence and the retry returns the original result
+instead of moving money twice. The Dwolla reference — previously discarded — is
+now stored, which is what makes reconciliation possible at all.
+
+This is the first table a request path writes to. The boundary was opened for
+that one route and is pinned by an allowlist; a second crossing fails the
+architecture suite.
+
 Idempotency and the ledger swapped places: a ledger that can double-post is
-worse than no ledger, so the idempotency key comes first.
+worse than no ledger, so the key came first.
 
 Deferred defects stay deferred until their milestone rather than being fixed
 opportunistically. Some tests deliberately assert current defective behaviour so

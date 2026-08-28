@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { NotFoundError } from "../repositories/errors";
+import { IdentityConflictError } from "../db/errors";
 import { UnauthorizedError } from "../auth/errors";
 import {
   InvalidTransferIntentError,
@@ -30,6 +31,10 @@ const {
   findCounterpartyBankByAccountId,
   createTransactionRecord,
   createDwollaTransfer,
+  findCustomerByAuthId,
+  claimTransfer,
+  markSubmitted,
+  markFailed,
 } = vi.hoisted(() => ({
   cookieGet: vi.fn(),
   accountGet: vi.fn(),
@@ -38,6 +43,10 @@ const {
   findCounterpartyBankByAccountId: vi.fn(),
   createTransactionRecord: vi.fn(),
   createDwollaTransfer: vi.fn(),
+  findCustomerByAuthId: vi.fn(),
+  claimTransfer: vi.fn(),
+  markSubmitted: vi.fn(),
+  markFailed: vi.fn(),
 }));
 
 vi.mock("next/headers", () => ({
@@ -84,6 +93,20 @@ vi.mock("../repositories/transactions.repository", async () => {
     toLegacyTransactionAmount: toDecimalString,
   };
 });
+vi.mock("../db/repositories/banking-customers.repository", () => ({
+  findCustomerByAuthId,
+  upsertBankingCustomer: vi.fn(),
+  findCustomerByUserDocumentId: vi.fn(),
+  countBankingCustomers: vi.fn(),
+  listBankingCustomers: vi.fn(),
+}));
+vi.mock("../db/repositories/transfers.repository", () => ({
+  claimTransfer,
+  markSubmitted,
+  markFailed,
+  findTransferByProviderId: vi.fn(),
+  listTransfersForCustomer: vi.fn(),
+}));
 vi.mock("../server/dwolla", () => ({
   createDwollaTransfer,
   dwollaClient: { post: vi.fn() },
@@ -118,7 +141,11 @@ const BOB_BANK = {
 /** base64 of "plaid-account-bob" — the reference Bob hands out. */
 const BOB_REFERENCE = Buffer.from(BOB_BANK.accountId).toString("base64");
 
+/** One per submission attempt; the browser resends it unchanged on retry. */
+const KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
 const VALID_INTENT = {
+  idempotencyKey: KEY,
   senderBankId: "bank-doc-alice",
   recipientReference: BOB_REFERENCE,
   amount: "25.00",
@@ -137,6 +164,14 @@ beforeEach(() => {
   authenticateAlice();
   getOwnedBankByDocumentId.mockResolvedValue(ALICE_BANK);
   findCounterpartyBankByAccountId.mockResolvedValue(BOB_BANK);
+  findCustomerByAuthId.mockResolvedValue({ id: "pg-customer-alice" });
+  // A fresh claim: this call owns the attempt and nothing has been sent yet.
+  claimTransfer.mockResolvedValue({
+    kind: "claimed",
+    row: { id: "pg-transfer-1", state: "requested" },
+  });
+  markSubmitted.mockResolvedValue({ id: "pg-transfer-1", state: "submitted" });
+  markFailed.mockResolvedValue({ id: "pg-transfer-1", state: "failed" });
   createDwollaTransfer.mockResolvedValue({
     transferUrl: "https://api-sandbox.dwolla.invalid/transfers/transfer-1",
     transferId: "transfer-1",
@@ -242,6 +277,9 @@ describe("G. a valid transfer", () => {
       destinationFundingSourceUrl: BOB_BANK.fundingSourceUrl,
       // Exact minor units, not a string. The adapter serialises it.
       amount: { amountMinor: 2500, currency: "USD" },
+      // Travels with the request: Dwolla returns the original transfer rather
+      // than creating a second one if this call is ever repeated.
+      idempotencyKey: KEY,
     });
   });
 
@@ -280,6 +318,7 @@ describe("G. a valid transfer", () => {
       sourceFundingSourceUrl: ALICE_BANK.fundingSourceUrl,
       destinationFundingSourceUrl: BOB_BANK.fundingSourceUrl,
       amount: { amountMinor: 2500, currency: "USD" },
+      idempotencyKey: KEY,
     });
   });
 
@@ -341,7 +380,12 @@ describe("J. the returned DTO", () => {
   it("has exactly the allowlisted shape", async () => {
     const result = await initiateTransfer(VALID_INTENT);
 
-    expect(result).toEqual({ transactionId: "tx-doc-1", status: "submitted" });
+    expect(result).toEqual({
+      transactionId: "tx-doc-1",
+      status: "submitted",
+      // A fresh submission, not a replay. The client has to be able to tell.
+      replayed: false,
+    });
     expect(Object.keys(result).sort()).toEqual([...TRANSFER_RESULT_DTO_FIELDS].sort());
   });
 
@@ -381,5 +425,216 @@ describe("NOT IDEMPOTENT — tracked defect", () => {
     expect(createTransactionRecord).toHaveBeenCalledTimes(2);
     // AFTER (idempotency milestone): the second call replays the first result
     // and the provider is called once.
+  });
+});
+
+/**
+ * IDEMPOTENCY, AT THE ENDPOINT.
+ *
+ * Asserted by REPLAY — issuing the request again and checking there is one
+ * financial effect — never by observing that a key row exists. A key table can
+ * be perfectly populated while the provider was called twice.
+ */
+describe("K. idempotency", () => {
+  it("REPLAY: a resolved key returns the original result and calls no provider", async () => {
+    claimTransfer.mockResolvedValue({
+      kind: "replayed",
+      row: { id: "pg-transfer-1", state: "submitted" },
+    });
+
+    const result = await initiateTransfer(VALID_INTENT);
+
+    // The assertion that matters: zero provider calls, not "a row was found".
+    expect(createDwollaTransfer).not.toHaveBeenCalled();
+    expect(createTransactionRecord).not.toHaveBeenCalled();
+    expect(result.replayed).toBe(true);
+    expect(result.status).toBe("submitted");
+  });
+
+  it("REPLAY of a failed attempt reports failed, not submitted", async () => {
+    claimTransfer.mockResolvedValue({
+      kind: "replayed",
+      row: { id: "pg-transfer-1", state: "failed" },
+    });
+
+    const result = await initiateTransfer(VALID_INTENT);
+
+    // Answering "submitted" for an attempt that failed would tell the user
+    // money is moving when it is not.
+    expect(result.status).toBe("failed");
+    expect(createDwollaTransfer).not.toHaveBeenCalled();
+  });
+
+  it("claims the key BEFORE calling the provider", async () => {
+    const order: string[] = [];
+    claimTransfer.mockImplementation(async () => {
+      order.push("claim");
+      return { kind: "claimed", row: { id: "pg-transfer-1", state: "requested" } };
+    });
+    createDwollaTransfer.mockImplementation(async () => {
+      order.push("provider");
+      return { transferUrl: "https://dwolla.invalid/transfers/t-1", transferId: "t-1" };
+    });
+
+    await initiateTransfer(VALID_INTENT);
+
+    // The ordering IS the mechanism. A claim made after the call leaves exactly
+    // the gap the key exists to close.
+    expect(order).toEqual(["claim", "provider"]);
+  });
+
+  it("sends the caller's key to the provider unchanged", async () => {
+    await initiateTransfer(VALID_INTENT);
+
+    expect(createDwollaTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ idempotencyKey: KEY })
+    );
+  });
+
+  it("records the provider reference that used to be discarded", async () => {
+    await initiateTransfer(VALID_INTENT);
+
+    expect(markSubmitted).toHaveBeenCalledWith({
+      transferId: "pg-transfer-1",
+      providerTransferId: "transfer-1",
+    });
+  });
+
+  it("an in-flight claim re-drives the provider with the same key", async () => {
+    // A previous attempt died between claiming and hearing back. Re-sending is
+    // safe precisely because the key goes with it.
+    claimTransfer.mockResolvedValue({
+      kind: "in-flight",
+      row: { id: "pg-transfer-1", state: "requested" },
+    });
+
+    await initiateTransfer(VALID_INTENT);
+
+    expect(createDwollaTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ idempotencyKey: KEY })
+    );
+  });
+
+  it("CONFLICT: the same key with a different payload is refused", async () => {
+    claimTransfer.mockRejectedValue(
+      new IdentityConflictError({
+        field: "transfers.idempotency_key",
+        stored: "fp-original",
+        incoming: "fp-different",
+      })
+    );
+
+    await expect(initiateTransfer(VALID_INTENT)).rejects.toBeInstanceOf(
+      IdentityConflictError
+    );
+    // Never silently replayed and never silently accepted.
+    expect(createDwollaTransfer).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed key before doing anything", async () => {
+    await expect(
+      initiateTransfer({ ...VALID_INTENT, idempotencyKey: "not-a-uuid" })
+    ).rejects.toBeInstanceOf(InvalidTransferIntentError);
+
+    expect(claimTransfer).not.toHaveBeenCalled();
+    expect(createDwollaTransfer).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing key", async () => {
+    const { idempotencyKey, ...withoutKey } = VALID_INTENT;
+    void idempotencyKey;
+
+    await expect(initiateTransfer(withoutKey)).rejects.toBeInstanceOf(
+      InvalidTransferIntentError
+    );
+    expect(createDwollaTransfer).not.toHaveBeenCalled();
+  });
+
+  it("marks the attempt failed when the provider rejects it", async () => {
+    createDwollaTransfer.mockRejectedValue(new Error("provider said no"));
+
+    await expect(initiateTransfer(VALID_INTENT)).rejects.toThrow();
+
+    // An explicit terminal state, not an abandoned `requested` row.
+    expect(markFailed).toHaveBeenCalledWith({
+      transferId: "pg-transfer-1",
+      failureCode: "PROVIDER_REJECTED",
+    });
+  });
+
+  it("does not record a provider reference it never received", async () => {
+    // Dwolla accepted but returned no location header. Money may have moved
+    // and there is nothing to reconcile it against.
+    createDwollaTransfer.mockResolvedValue({ transferUrl: null, transferId: null });
+
+    await expect(initiateTransfer(VALID_INTENT)).rejects.toBeInstanceOf(
+      TransferSubmittedButNotRecordedError
+    );
+
+    expect(markSubmitted).not.toHaveBeenCalled();
+    // NOT marked failed: that would claim nothing happened.
+    expect(markFailed).not.toHaveBeenCalled();
+  });
+
+  it("refuses a customer who was never migrated", async () => {
+    findCustomerByAuthId.mockResolvedValue(null);
+
+    await expect(initiateTransfer(VALID_INTENT)).rejects.toBeInstanceOf(
+      InvalidTransferIntentError
+    );
+    expect(createDwollaTransfer).not.toHaveBeenCalled();
+  });
+
+  it("derives the customer from the session, never from the caller", async () => {
+    await initiateTransfer({
+      ...VALID_INTENT,
+      customerId: "pg-customer-mallory",
+    } as never);
+
+    // The extra key is stripped by the schema; the claim uses the actor's own
+    // customer id.
+    expect(claimTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ customerId: "pg-customer-alice" })
+    );
+  });
+
+  it("fingerprints server-resolved values, not the raw request", async () => {
+    await initiateTransfer(VALID_INTENT);
+    const first = claimTransfer.mock.calls[0][0].requestFingerprint;
+
+    vi.clearAllMocks();
+    authenticateAlice();
+    getOwnedBankByDocumentId.mockResolvedValue(ALICE_BANK);
+    findCounterpartyBankByAccountId.mockResolvedValue(BOB_BANK);
+    findCustomerByAuthId.mockResolvedValue({ id: "pg-customer-alice" });
+    claimTransfer.mockResolvedValue({
+      kind: "claimed",
+      row: { id: "pg-transfer-1", state: "requested" },
+    });
+    markSubmitted.mockResolvedValue({ id: "pg-transfer-1", state: "submitted" });
+    createDwollaTransfer.mockResolvedValue({
+      transferUrl: "https://dwolla.invalid/transfers/dwolla-transfer-1",
+      transferId: "dwolla-transfer-1",
+    });
+    createTransactionRecord.mockResolvedValue({ $id: "tx-doc-1" });
+
+    // Same transfer, cosmetically different input: a different note and a
+    // differently-spelled amount that parses to the same minor units.
+    await initiateTransfer({ ...VALID_INTENT, amount: "25", note: "Something else" });
+    const second = claimTransfer.mock.calls[0][0].requestFingerprint;
+
+    // Neither the note nor the string form is part of what moves money.
+    expect(second).toBe(first);
+  });
+
+  it("a different amount produces a different fingerprint", async () => {
+    await initiateTransfer(VALID_INTENT);
+    const first = claimTransfer.mock.calls[0][0].requestFingerprint;
+
+    await initiateTransfer({ ...VALID_INTENT, amount: "26.00" });
+    const second = claimTransfer.mock.calls[1][0].requestFingerprint;
+
+    // Otherwise one key could move two different sums.
+    expect(second).not.toBe(first);
   });
 });

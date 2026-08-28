@@ -18,7 +18,20 @@ export type TransferResultDTO = {
    * webhook or state machine to learn the outcome. Claiming a terminal state
    * here would be the same defect as deriving status from a timestamp.
    */
-  status: "submitted";
+  status: "submitted" | "failed";
+  /**
+   * True when this call matched an idempotency key that had already resolved,
+   * so no provider call was made and no second transfer exists.
+   *
+   * Surfaced deliberately rather than hidden behind an identical response: a
+   * client that cannot tell a replay from a fresh submission cannot tell the
+   * user whether their retry did anything.
+   */
+  replayed: boolean;
 };
 
-export const TRANSFER_RESULT_DTO_FIELDS = ["transactionId", "status"] as const;
+export const TRANSFER_RESULT_DTO_FIELDS = [
+  "transactionId",
+  "status",
+  "replayed",
+] as const;

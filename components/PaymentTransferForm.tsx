@@ -3,7 +3,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import * as z from "zod";
 
@@ -43,6 +43,19 @@ const PaymentTransferForm = ({ accounts }: PaymentTransferFormProps) => {
   const router = useRouter();
   const [isLoading, setIsLoading] = useState(false);
 
+  /**
+   * The idempotency key for the CURRENT attempt.
+   *
+   * Held in a ref rather than minted at call time, because the whole mechanism
+   * depends on a retry carrying the SAME key. A key generated inside submit()
+   * would be new on every press, which deduplicates nothing.
+   *
+   * It is cleared only after a submission that we know resolved, so a retry
+   * after a network failure reuses it and the server answers from the original
+   * attempt instead of moving money again.
+   */
+  const idempotencyKey = useRef<string | null>(null);
+
   const form = useForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -61,16 +74,24 @@ const PaymentTransferForm = ({ accounts }: PaymentTransferFormProps) => {
    * The zod schema above is for user feedback only. The server revalidates
    * every field — a caller can post directly to the action.
    *
-   * NOT IDEMPOTENT. isLoading disables the button while a request is in
-   * flight, which is UX, not a guarantee: a retry, a second tab or a replayed
-   * request still creates a second transfer.
+   * IDEMPOTENT. The key below identifies one user action across attempts: the
+   * server claims it durably before calling the provider, so a retry returns
+   * the original result rather than moving money twice.
+   *
+   * `isLoading` still disables the button, but it is UX — it does nothing about
+   * a second tab, a refresh, or a replayed request. The key is the guarantee.
    */
   const submit = async (data: z.infer<typeof formSchema>) => {
     if (isLoading) return;
     setIsLoading(true);
 
+    // Reused across retries of THIS submission; a fresh one is minted only
+    // after an attempt resolves.
+    idempotencyKey.current ??= crypto.randomUUID();
+
     try {
       await initiateTransfer({
+        idempotencyKey: idempotencyKey.current,
         senderBankId: data.senderBank,
         recipientReference: data.shareableId,
         amount: data.amount,
@@ -78,11 +99,14 @@ const PaymentTransferForm = ({ accounts }: PaymentTransferFormProps) => {
         recipientEmail: data.email,
       });
 
+      // Resolved, so the next submission is a new user action.
+      idempotencyKey.current = null;
       form.reset();
       router.push("/");
     } catch (error) {
-      // The error may report that the provider accepted the transfer but the
-      // local record failed. Never present that as "nothing happened".
+      // Deliberately KEEPS the key. The attempt may have reached the provider,
+      // so the next press must be recognisable as the same action rather than
+      // a new transfer.
       console.error("Transfer request failed");
     }
 

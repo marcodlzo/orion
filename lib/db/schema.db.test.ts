@@ -110,23 +110,40 @@ describe("A. migrations applied to an empty database", () => {
     expect(names).toContain("linked_accounts");
   });
 
-  it("created NO ledger, transfer or balance tables — those are later phases", () => {
+  it("created NO ledger or balance tables — those are later phases", () => {
     return pool
       .query<{ table_name: string }>(
         `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`
       )
       .then(({ rows }) => {
         const names = rows.map((r) => r.table_name);
+        // `transfers` LEFT this list in the idempotency phase, which is what
+        // that phase was for. Everything still here is genuinely absent, and a
+        // shell created early would invite premature coupling.
+        //
+        // `idempotency_keys` stays absent deliberately: the key lives ON the
+        // transfer, because for this milestone the key IS the transfer's
+        // identity. A generic key store is a decision for whenever a second
+        // operation needs one.
         for (const forbidden of [
           "ledger_entries",
           "ledger_accounts",
-          "transfers",
           "balances",
           "holds",
           "idempotency_keys",
         ]) {
           expect(names).not.toContain(forbidden);
         }
+      });
+  });
+
+  it("created the transfers table", () => {
+    return pool
+      .query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`
+      )
+      .then(({ rows }) => {
+        expect(rows.map((r) => r.table_name)).toContain("transfers");
       });
   });
 });
@@ -390,7 +407,7 @@ describe("K. no authoritative balance column exists", () => {
 });
 
 describe("L. timestamps are timezone aware", () => {
-  it("both tables use timestamptz, not timestamp", async () => {
+  it("every table uses timestamptz, not timestamp", async () => {
     const { rows } = await pool.query<{
       table_name: string;
       column_name: string;
@@ -402,7 +419,9 @@ describe("L. timestamps are timezone aware", () => {
         ORDER BY table_name, column_name`
     );
 
-    expect(rows.length).toBe(4);
+    // Three tables x created_at/updated_at. Asserting the count as well as the
+    // type stops a new table slipping in with untyped timestamps.
+    expect(rows.length).toBe(6);
     for (const row of rows) {
       // `timestamp without time zone` silently reinterprets values by server
       // locale, which for financial records is a correctness bug.
