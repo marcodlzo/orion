@@ -129,6 +129,29 @@ Security-relevant properties, each enforced by a test rather than a convention:
   one a promise that never settles stalls the migration silently — the error
   handling only catches calls that *reject*.
 
+- **The verifier cannot write.** Its snapshot runs in a `READ ONLY` transaction
+  enforced by PostgreSQL, not by convention: an `INSERT` or `UPDATE` fails
+  `25006` and leaves no row. "No caller writes" is a fact about today's callers;
+  `READ ONLY` is a fact about the transaction.
+
+- **The verifier does not rely on the schema to prove uniqueness.** It checks
+  four bridges itself — customer auth id, customer user-document id, account
+  natural key, account legacy bank-document id — and reports every duplicate
+  with its row count and ids. Indexing PostgreSQL with a plain `Map` had
+  silently kept the last row per key, which meant the check most likely to
+  reveal corruption was the one that hid it.
+
+- **Connections of unknown state are destroyed, not reused.** A lost
+  acknowledgement for `pg_advisory_lock` or `BEGIN` does not prove the statement
+  did not run: the server may be holding a session lock, or sitting inside an
+  open transaction, while the client saw only an error. Returning that
+  connection to the pool would strand the lock until the process exited, or hand
+  the next caller someone else's open transaction. All three paths mark the
+  client suspect so it is discarded. Proven against real PostgreSQL by asserting
+  the consequence — the advisory lock actually becomes free, and the backend
+  holding the open transaction actually ends — rather than that a release
+  function was called.
+
 See [`docs/migration/appwrite-to-postgresql.md`](docs/migration/appwrite-to-postgresql.md)
 for the full contract, including what each claim rests on.
 

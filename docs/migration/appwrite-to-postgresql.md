@@ -134,6 +134,25 @@ that was nothing but a race with itself. The stored data was always correct; the
 *report* was not. The lock releases on commit or rollback, so a crashed run
 cannot leave it held.
 
+### A connection whose state is unknown is discarded
+
+A lost acknowledgement is not proof that the statement did not run. If
+`pg_advisory_lock` or `BEGIN` fails, the server may well have executed it and
+only the reply went missing — leaving the session holding the migration lock, or
+sitting inside an open transaction, while the client saw nothing but an error.
+
+Returning that connection to the pool is the damaging part. A stranded session
+lock blocks every later migration until the process exits, and an open
+transaction gets handed to whoever draws that connection next. So all three
+paths — the lock, and `BEGIN` in both transaction helpers — mark the client
+suspect and destroy it instead.
+
+Proven by the consequence rather than the call: `pool-state.db.test.ts` asserts
+against real PostgreSQL that the advisory lock genuinely becomes free again, and
+that the backend holding the open transaction genuinely ends. Asserting only
+that a release function was called would have passed just as well with the
+connection quietly back in the pool.
+
 ### Re-running is safe
 
 Both repositories upsert. Re-run freely — after a Plaid outage, after fixing a
@@ -435,7 +454,10 @@ report every missed record as a PostgreSQL orphan.
 | **no secret leakage** | Unique sentinel values for access token, funding-source URL, processor token and DB password, asserted absent from stored rows, reports, error messages, error stacks and JSON across success, provider failure, DB failure, dry run and verification. The absence of an `access_token` column is *not* treated as proof. |
 | **migration complete** | `scanned` vs `reportedTotal` vs `pages` for both collections, with a short read throwing and a non-advancing cursor throwing. Multi-page reads are tested, including the exact-multiple boundary. |
 | **verification independent** | The verifier's dependency list contains no backfill input; it re-derives expectations from the source via `planMigration`. Tested by changing the source under a previously-correct PostgreSQL state and asserting drift appears. |
+| **uniqueness actually checked** | The verifier does not delegate uniqueness to the schema. It groups rather than overwrites, reports every duplicated bridge with its row count and ids, and keys accounts on `(customer, provider, external account)` — the same triple as the unique index. |
+| **connection state never assumed** | A lost `pg_advisory_lock` or `BEGIN` acknowledgement destroys the client. Asserted by consequence against real PostgreSQL: the lock becomes free again, and the backend holding the open transaction ends. `pool-state.db.test.ts`. |
 | **runtime unchanged** | Import-boundary tests proving no server action, client component, `app/` page/layout/route, or application repository/service reaches `lib/migration/` **or** `lib/db/` at any depth. Mutation-tested: planting either import fails the suite. |
+| **gates reproducible** | Not merely green on one machine. CI runs typecheck, lint, unit tests, migrations against a **freshly created empty database**, the full `test:db` suite, the build, and three client-bundle credential and source-map scans — on a clean checkout. |
 
 ---
 

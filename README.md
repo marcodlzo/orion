@@ -89,16 +89,31 @@ enabled, which is how five type errors shipped.
 |---|---|---|
 | 0 | Secure buildable baseline — credentials removed, quality gates restored | done |
 | 1 | Test harness and CI | done |
-| 2 | Authorization foundation — server-resolved identity, ownership checks, DTO boundary | next |
-| 3 | Money primitives — integer minor units | |
-| 4 | PostgreSQL introduction | |
-| 5 | Immutable double-entry ledger | |
-| 6 | Idempotency and server-side transfer orchestration | |
+| 2 | Authorization foundation — server-resolved identity, ownership checks, DTO boundary | done |
+| 3 | Money primitives — integer minor units | done |
+| 4 | PostgreSQL introduction — schema, migrations, backfill, verifier | done |
+| 5 | Idempotency and durable transfer records | next |
+| 6 | Immutable double-entry ledger | |
 | 7 | Transfer state machine and provider webhooks | |
 | 8 | Holds, available vs ledger balance, concurrency safety | |
 | 9 | Reconciliation, audit trail, reversals | |
 | 10 | Plaid sync rebuild — cursor persistence, full change handling | |
 | 11 | UI rebuild | |
+
+**Milestone 2** shrank the server-action surface from 24 exports to 7, moved
+identity resolution into the session, pushed ownership checks into the
+repositories, stopped persisting SSN and date of birth, and put transfer
+orchestration behind a single server-owned endpoint.
+
+**Milestone 4** built the Appwrite → PostgreSQL migration engine: schema,
+migrations, idempotent repositories, a backfill whose dry run is a real
+transaction that rolls back, and an independent verifier. PostgreSQL is
+**populated but not authoritative** — every request path still reads and writes
+Appwrite, and an import-boundary test proves a cutover cannot happen by
+accident. Doing it on purpose is blocked on encrypting provider credentials.
+
+Idempotency and the ledger swapped places: a ledger that can double-post is
+worse than no ledger, so the idempotency key comes first.
 
 Deferred defects stay deferred until their milestone rather than being fixed
 opportunistically. Some tests deliberately assert current defective behaviour so
@@ -108,10 +123,13 @@ and carry an `AFTER` comment describing what replaces them.
 ## Stack
 
 Next.js 14 (App Router) · React 18 · TypeScript 5 (`strict`) · Tailwind +
-shadcn/ui · Appwrite · Plaid · Dwolla · Zod · Vitest
+shadcn/ui · Appwrite · **PostgreSQL 16** (`pg`, `node-pg-migrate`, Docker) ·
+Plaid · Dwolla · Zod · Vitest
 
-Appwrite currently provides authentication and storage. Financial state migrates
-to PostgreSQL; Appwrite may remain authentication infrastructure.
+Appwrite currently provides authentication and storage, and remains the runtime
+source for every request path. PostgreSQL holds the migrated identity and
+linkage map and will own financial state; Appwrite may remain authentication
+infrastructure after cutover.
 
 ## Running locally
 
@@ -128,13 +146,40 @@ placeholder template and must never contain a real value.
 ```bash
 npm run typecheck   # tsc --noEmit, must be 0 errors
 npm run lint        # must be clean
-npm test            # vitest
+npm test            # vitest — unit and integration, no database required
 npm run build       # gates are on; a type or lint error fails the build
 ```
 
-CI runs all four on every push and pull request, plus two security gates: a scan
-of the client bundle for credential patterns including source maps, and an
-assertion that no `.js.map` is served to clients.
+Database work needs Docker:
+
+```bash
+npm run db:up       # PostgreSQL 16 via docker compose
+npm run db:migrate  # apply migrations to DATABASE_URL
+npm run test:db     # integration tests — REQUIRES TEST_DATABASE_URL
+```
+
+`test:db` requires `TEST_DATABASE_URL` and never falls back to `DATABASE_URL`.
+These suites `TRUNCATE`, so an unset variable stops the run rather than picking
+a target; it also refuses when both variables resolve to the same database, or
+when the name does not end in `_test`.
+
+Operator-only, never reachable from the application:
+
+```bash
+npm run db:backfill                                  # dry run (the default)
+npm run db:backfill:commit -- --expect-source=<digest>
+npm run db:verify
+```
+
+The dry run writes nothing and prints a source digest; the commit requires that
+digest and refuses if the source changed in between.
+
+CI runs every gate above on each push and pull request — typecheck, lint, unit
+tests, migrations applied to a **freshly created empty database**, the full
+`test:db` suite, and the build — plus three security gates: a scan of the client
+bundle for credential patterns including source maps, an assertion that no
+provider credential name appears in client output, and an assertion that no
+`.js.map` is served to clients.
 
 ## Security
 
