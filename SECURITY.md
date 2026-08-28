@@ -73,12 +73,17 @@ They are real, and this application should not be exposed to untrusted users.
 | No ledger; balances read live from the provider | High | 6 |
 | Provider acceptance treated as settlement | High | 7 |
 | `transactionsSync` called without a cursor; results overwritten each page | High | 10 |
-| No rate limiting on authentication or money movement | Medium | 2 |
-| `shareableId` is base64 encoding presented as encryption | Medium | 2 |
+| No rate limiting on authentication or money movement | Medium | unscheduled |
+| `shareableId` is base64 encoding presented as encryption | Medium | unscheduled |
 | Transaction status derived from a timestamp | Medium | 7 |
 | Provider credentials stored in plaintext Appwrite documents | High | unscheduled |
 
-The last row is not new, but it is now stated plainly rather than implied: access
+Three rows now read **unscheduled**, and that is a correction rather than a
+demotion: rate limiting and `shareableId` were tagged to Milestone 2, which
+closed without them. A finding pointing at a completed milestone is how work
+quietly disappears, so they are named as unowned until something claims them.
+
+The credentials row is not new, but it is now stated plainly rather than implied: access
 tokens, processor tokens and funding-source URLs live unencrypted in the
 document store. This is why the PostgreSQL migration does **not** copy them —
 and why it cannot be completed until this is fixed. It has no milestone yet,
