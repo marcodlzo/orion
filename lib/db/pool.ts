@@ -8,6 +8,7 @@ import "server-only";
 import { Pool, type PoolClient, type QueryResultRow } from "pg";
 
 import {
+  ConstraintViolationError,
   DatabaseUnavailableError,
   TransactionOutcomeUnknownError,
   toDatabaseError,
@@ -264,6 +265,21 @@ export async function withTransaction<T>(
     try {
       await client.query("COMMIT");
     } catch (error) {
+      const classified = toDatabaseError(error);
+
+      // A DEFERRED CONSTRAINT IS NOT AN AMBIGUOUS OUTCOME.
+      //
+      // Deferred constraints — the ledger's balance check among them — are
+      // evaluated at COMMIT, so a violation surfaces here rather than at the
+      // statement that caused it. The server evaluated the rule, rejected the
+      // transaction and rolled it back. That is a decision, not a lost reply,
+      // and reporting it as "we cannot know" would be strictly less true than
+      // what PostgreSQL just told us. The connection is fine, too: the
+      // transaction ended cleanly.
+      if (classified instanceof ConstraintViolationError) {
+        throw classified;
+      }
+
       // THE DURABLE OUTCOME IS UNKNOWN.
       //
       // A failed COMMIT does not mean "not committed". PostgreSQL may have

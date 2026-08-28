@@ -110,24 +110,25 @@ describe("A. migrations applied to an empty database", () => {
     expect(names).toContain("linked_accounts");
   });
 
-  it("created NO ledger or balance tables — those are later phases", () => {
+  it("created NO holds or stored-balance tables — those are later phases", () => {
     return pool
       .query<{ table_name: string }>(
         `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`
       )
       .then(({ rows }) => {
         const names = rows.map((r) => r.table_name);
-        // `transfers` LEFT this list in the idempotency phase, which is what
-        // that phase was for. Everything still here is genuinely absent, and a
-        // shell created early would invite premature coupling.
+        // Tables leave this list as their milestone lands: `transfers` in the
+        // idempotency phase, `ledger_*` in the ledger phase. What remains is
+        // genuinely absent, and a shell created early invites premature
+        // coupling.
         //
-        // `idempotency_keys` stays absent deliberately: the key lives ON the
-        // transfer, because for this milestone the key IS the transfer's
-        // identity. A generic key store is a decision for whenever a second
-        // operation needs one.
+        // `balances` stays absent PERMANENTLY, not until a later phase: a
+        // stored balance is a second source of truth that drifts from the
+        // entries silently. Balance is derived.
+        //
+        // `idempotency_keys` stays absent deliberately too — the key lives ON
+        // the transfer, because there the key IS the transfer's identity.
         for (const forbidden of [
-          "ledger_entries",
-          "ledger_accounts",
           "balances",
           "holds",
           "idempotency_keys",
@@ -137,13 +138,21 @@ describe("A. migrations applied to an empty database", () => {
       });
   });
 
-  it("created the transfers table", () => {
+  it("created the transfers and ledger tables", () => {
     return pool
       .query<{ table_name: string }>(
         `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'`
       )
       .then(({ rows }) => {
-        expect(rows.map((r) => r.table_name)).toContain("transfers");
+        const names = rows.map((r) => r.table_name);
+        for (const expected of [
+          "transfers",
+          "ledger_accounts",
+          "ledger_transactions",
+          "ledger_entries",
+        ]) {
+          expect(names).toContain(expected);
+        }
       });
   });
 });
@@ -419,9 +428,14 @@ describe("L. timestamps are timezone aware", () => {
         ORDER BY table_name, column_name`
     );
 
-    // Three tables x created_at/updated_at. Asserting the count as well as the
-    // type stops a new table slipping in with untyped timestamps.
-    expect(rows.length).toBe(6);
+    // Asserting the COUNT as well as the type is what stops a new table
+    // slipping in with untyped timestamps. It has to be updated deliberately
+    // each time the schema grows, which is the point.
+    //
+    // banking_customers, linked_accounts, transfers, ledger_accounts: two each.
+    // ledger_transactions and ledger_entries are append-only, so they carry
+    // created_at only.
+    expect(rows.length).toBe(10);
     for (const row of rows) {
       // `timestamp without time zone` silently reinterprets values by server
       // locale, which for financial records is a correctness bug.

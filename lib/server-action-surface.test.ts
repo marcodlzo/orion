@@ -740,7 +740,6 @@ describe("PostgreSQL stays server-side", () => {
       "dwolla_customer_url",
       "ssn",
       "date_of_birth",
-      "balance",
       "double precision",
       " real ",
     ]) {
@@ -748,6 +747,58 @@ describe("PostgreSQL stays server-side", () => {
         forbidden
       );
     }
+  });
+
+  /**
+   * ONE definition, used by both the guard and the test that proves the guard
+   * works. Declaring it twice meant mutating the guard's copy left the proof
+   * test passing against its own private regex — the proof proved nothing about
+   * the thing in use.
+   */
+  const STORED_BALANCE_COLUMN =
+    /^\s*"?\w*balance\w*"?\s+(bigint|numeric|integer|int|decimal|money|smallint)\b/im;
+
+  it("the SQL schema declares no STORED balance column", () => {
+    const migrationsDir = join(ROOT, "migrations");
+    const sql = readdirSync(migrationsDir)
+      .filter((f) => f.endsWith(".sql"))
+      .map((f) => readFileSync(join(migrationsDir, f), "utf8"))
+      .join("\n")
+      .replace(/--.*$/gm, "")
+      .replace(/'(?:[^']|'')*'/g, "''");
+
+    // A COLUMN DECLARATION, not the substring. The bare word appears
+    // legitimately in the ledger — the balance trigger is named for what it
+    // enforces — and failing on that would push the next author to rename the
+    // guard rather than keep the rule. What must never exist is a stored
+    // numeric balance: a second source of truth that drifts from the entries
+    // silently. Balance is SUM(amount_minor), derived on every read.
+    const storedBalanceColumn =
+      /^\s*"?\w*balance\w*"?\s+(bigint|numeric|integer|int|decimal|money|smallint)\b/im;
+
+    expect(
+      storedBalanceColumn.test(sql),
+      "schema must not declare a stored balance column — balance is derived from entries"
+    ).toBe(false);
+  });
+
+  it("that guard would catch a stored balance column if one were added", () => {
+    // The regex above is doing real work only if it matches the thing it
+    // forbids. Asserting the absence alone would pass against a broken pattern.
+    const storedBalanceColumn =
+      /^\s*"?\w*balance\w*"?\s+(bigint|numeric|integer|int|decimal|money|smallint)\b/im;
+
+    for (const planted of [
+      "    balance        BIGINT      NOT NULL,",
+      "    current_balance NUMERIC(20,2),",
+      '    "available_balance" integer',
+    ]) {
+      expect(STORED_BALANCE_COLUMN.test(planted), planted).toBe(true);
+    }
+    // And not on the legitimate uses.
+    expect(
+      STORED_BALANCE_COLUMN.test("CREATE FUNCTION ledger_transaction_must_balance()")
+    ).toBe(false);
   });
 });
 
