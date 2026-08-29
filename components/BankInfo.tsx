@@ -1,12 +1,12 @@
 "use client";
 
 import Image from "next/image";
+import { formatMinorUnits } from "@/lib/domain/money";
 import { useSearchParams, useRouter } from "next/navigation";
 
 import {
   cn,
   formUrlQuery,
-  formatAmount,
   getAccountTypeColors,
 } from "@/lib/utils";
 
@@ -64,7 +64,7 @@ const BankInfo = ({ account, appwriteItemId, type }: BankInfoProps) => {
         </div>
 
         <p className={`text-16 font-medium text-blue-700 ${colors.subText}`}>
-          {formatAmount(account.currentBalance)}
+          {formatMinorUnits(account.currentBalanceMinor)}
         </p>
       </div>
     </div>

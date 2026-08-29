@@ -197,8 +197,23 @@ export const createLinkToken = async () => {
  * under another user, and the funding source is attached to the actor's own
  * Dwolla customer.
  *
- * DEFECT (not this phase): only accounts[0] is used, so every other account on
- * the Plaid Item is discarded.
+ * EVERY DEPOSITORY ACCOUNT ON THE ITEM IS LINKED, not `accounts[0]`.
+ *
+ * The tutorial took the first account and discarded the rest, so a user linking
+ * a bank with a chequing and a savings account silently got one of them — and
+ * which one depended on Plaid's ordering. Every account now gets its own funding
+ * source and its own bank record, which is what the schema already modelled: a
+ * bank document carries an `accountId`.
+ *
+ * FILTERED TO DEPOSITORY. A credit card or a loan appears in the same response
+ * and cannot fund an ACH transfer; asking Dwolla for a funding source on one
+ * fails, and doing it inside the loop would abandon the accounts that came
+ * after. Non-depository accounts are skipped deliberately, not by accident.
+ *
+ * PARTIAL SUCCESS IS REPORTED, NOT SWALLOWED. If one account's funding source
+ * fails, the others are still linked and the result says how many succeeded. The
+ * alternative — failing the whole link — would make one unsupported account
+ * block a user's entire bank.
  */
 export const exchangePublicToken = async ({
   publicToken,
@@ -217,37 +232,75 @@ export const exchangePublicToken = async ({
       access_token: accessToken,
     });
 
-    const accountData = accountsResponse.data.accounts[0];
+    // Depository only: these are the accounts ACH can draw on. The rest are
+    // reported as skipped rather than silently dropped.
+    const linkable = accountsResponse.data.accounts.filter(
+      (account) => account.type === "depository"
+    );
 
-    const request: ProcessorTokenCreateRequest = {
-      access_token: accessToken,
-      account_id: accountData.account_id,
-      processor: "dwolla" as ProcessorTokenCreateRequestProcessorEnum,
-    };
+    if (linkable.length === 0) {
+      throw new Error("This bank has no accounts that can send or receive money");
+    }
 
-    const processorTokenResponse = await plaidClient.processorTokenCreate(request);
-    const processorToken = processorTokenResponse.data.processor_token;
+    let linked = 0;
+    const failed: string[] = [];
 
-    const fundingSourceUrl = await addFundingSource({
-      dwollaCustomerId: actor.dwollaCustomerId,
-      processorToken,
-      bankName: accountData.name,
-    });
+    for (const accountData of linkable) {
+      try {
+        const request: ProcessorTokenCreateRequest = {
+          access_token: accessToken,
+          account_id: accountData.account_id,
+          processor: "dwolla" as ProcessorTokenCreateRequestProcessorEnum,
+        };
 
-    if (!fundingSourceUrl) throw new Error("Failed to create a Dwolla funding source");
+        const processorTokenResponse =
+          await plaidClient.processorTokenCreate(request);
+        const processorToken = processorTokenResponse.data.processor_token;
 
-    await createBankForActor(actor, {
-      bankId: itemId,
-      accountId: accountData.account_id,
-      accessToken,
-      fundingSourceUrl,
-      shareableId: encryptId(accountData.account_id),
-    });
+        const fundingSourceUrl = await addFundingSource({
+          dwollaCustomerId: actor.dwollaCustomerId,
+          processorToken,
+          // Distinct per account, so a user with two accounts at one bank can
+          // tell them apart in Dwolla.
+          bankName: `${accountData.name} ${accountData.mask ?? ""}`.trim(),
+        });
+
+        if (!fundingSourceUrl) {
+          throw new Error("Failed to create a Dwolla funding source");
+        }
+
+        await createBankForActor(actor, {
+          bankId: itemId,
+          accountId: accountData.account_id,
+          accessToken,
+          fundingSourceUrl,
+          shareableId: encryptId(accountData.account_id),
+        });
+
+        linked += 1;
+      } catch (error) {
+        // The ACCOUNT ID, never the error: a Plaid or Dwolla error echoes the
+        // request, and the request carries the access token and the processor
+        // token.
+        console.error(
+          "Failed to link one account on the item:",
+          accountData.account_id
+        );
+        failed.push(accountData.account_id);
+      }
+    }
+
+    if (linked === 0) {
+      throw new Error("None of this bank's accounts could be linked");
+    }
 
     revalidatePath("/");
 
     return parseStringify({
       publicTokenExchange: "complete",
+      linkedAccounts: linked,
+      skippedAccounts:
+        accountsResponse.data.accounts.length - linkable.length + failed.length,
     });
   } catch (error) {
     console.error("An error occurred while creating exchanging token:", error);

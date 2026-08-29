@@ -11,7 +11,7 @@ import {
 } from "./bank.dto";
 import {
   TRANSACTION_DTO_FIELDS,
-  toTransactionDTOFromPlaid,
+  toTransactionDTOFromStore,
   toTransactionDTOFromRecord,
 } from "./transaction.dto";
 
@@ -175,7 +175,10 @@ describe("AccountSummaryDTO", () => {
       mask: "0000",
       type: "depository",
       subtype: "checking",
-      currentBalance: 110,
+      // EXACT MINOR UNITS, converted at the adapter edge. This was a float
+      // taken straight from Plaid's JSON and then summed across accounts, so
+      // the representation error compounded once per linked account.
+      currentBalanceMinor: 11000,
       shareableId: "cGxhaWQtYWNjb3VudC0x",
     });
   });
@@ -210,28 +213,94 @@ describe("AccountSummaryDTO", () => {
 });
 
 describe("TransactionDTO", () => {
-  it("maps a Plaid transaction to exactly the allowlisted shape", () => {
-    const dto = toTransactionDTOFromPlaid({
-      transaction_id: "plaid-tx-1",
-      name: "Coffee",
-      date: "2026-02-01",
-      amount: 4.5,
-      payment_channel: "in store",
-      category: ["Food and Drink", "Coffee"],
-      account_id: "plaid-account-1",
-      pending: false,
-      logo_url: "https://example.invalid/logo.png",
-    });
+  const storeRow = (over: Record<string, unknown> = {}) => ({
+    id: "row-1",
+    item_id: "item-1",
+    plaid_transaction_id: "plaid-tx-1",
+    plaid_account_id: "plaid-account-1",
+    amount_minor: "450",
+    iso_currency: "USD",
+    posted_date: "2026-02-01",
+    name: "Coffee",
+    merchant_name: "Blue Bottle",
+    pending: false,
+    removed_at: null,
+    first_seen_at: new Date("2026-02-01T00:00:00.000Z"),
+    updated_at: new Date("2026-02-01T00:00:00.000Z"),
+    ...over,
+  });
+
+  it("maps a synced transaction to exactly the allowlisted shape", () => {
+    const dto = toTransactionDTOFromStore(storeRow());
 
     expect(dto).toEqual({
       id: "plaid-tx-1",
       name: "Coffee",
       date: "2026-02-01",
-      amount: 4.5,
-      type: "in store",
-      paymentChannel: "in store",
-      category: "Food and Drink",
+      // EXACT MINOR UNITS, and the sign carried by direction rather than by
+      // the number — a positive Plaid amount means money LEFT the account.
+      amountMinor: 450,
+      direction: "debit",
+      // The provider's own flag, not the age of the row.
+      status: "posted",
+      paymentChannel: "merchant",
+      category: "Blue Bottle",
     });
+    expect(Object.keys(dto).sort()).toEqual([...TRANSACTION_DTO_FIELDS].sort());
+  });
+
+  it("reads Plaid's sign convention as a direction, not as a negative amount", () => {
+    // Positive means money left the account. Getting this backwards would show
+    // every payment as income, and every deposit as a charge.
+    const outgoing = toTransactionDTOFromStore(
+      storeRow({ amount_minor: "1250", name: "Payment", merchant_name: null })
+    );
+    const incoming = toTransactionDTOFromStore(
+      storeRow({ amount_minor: "-1250", name: "Refund", merchant_name: null })
+    );
+
+    expect(outgoing.direction).toBe("debit");
+    expect(incoming.direction).toBe("credit");
+    // The magnitude is the same either way; only the direction differs.
+    expect(outgoing.amountMinor).toBe(1250);
+    expect(incoming.amountMinor).toBe(1250);
+  });
+
+  it("carries a pending transaction's real status", () => {
+    const dto = toTransactionDTOFromStore(storeRow({ pending: true }));
+
+    expect(dto.status).toBe("pending");
+  });
+
+  it("maps a stored row from the synced store", () => {
+    const dto = toTransactionDTOFromStore({
+      id: "row-1",
+      item_id: "item-1",
+      plaid_transaction_id: "plaid-tx-9",
+      plaid_account_id: "acct-1",
+      amount_minor: "-2599",
+      iso_currency: "USD",
+      posted_date: "2026-03-01",
+      name: "Refund",
+      merchant_name: null,
+      pending: false,
+      removed_at: null,
+      first_seen_at: new Date("2026-03-01T00:00:00.000Z"),
+      updated_at: new Date("2026-03-01T00:00:00.000Z"),
+    });
+
+    expect(dto).toEqual({
+      id: "plaid-tx-9",
+      name: "Refund",
+      date: "2026-03-01",
+      amountMinor: 2599,
+      direction: "credit",
+      status: "posted",
+      paymentChannel: "other",
+      category: "",
+    });
+    // The internal row id and the item id never leave the server.
+    expect(dto).not.toHaveProperty("item_id");
     expect(Object.keys(dto).sort()).toEqual([...TRANSACTION_DTO_FIELDS].sort());
   });
 
@@ -257,11 +326,36 @@ describe("TransactionDTO", () => {
       id: "tx-doc-1",
       name: "Rent",
       date: "2026-02-02T10:00:00.000Z",
-      amount: 1200,
-      type: "debit",
+      // The legacy column is the STRING "1200.00". Parsed by digits, not by
+      // Number(value) * 100, which is fractionally low for many values.
+      amountMinor: 120000,
+      direction: "debit",
+      // A legacy row carries no state, so it is shown as submitted rather than
+      // as a settlement nobody confirmed.
+      status: "submitted",
       paymentChannel: "online",
       category: "Transfer",
     });
+  });
+
+  it("parses legacy decimal strings without float multiplication", () => {
+    const amountOf = (amount: string) =>
+      toTransactionDTOFromRecord(
+        { $id: "t", $createdAt: "d", name: "n", amount, channel: "", category: "" },
+        "debit"
+      ).amountMinor;
+
+    expect(amountOf("1200.00")).toBe(120000);
+    expect(amountOf("0.01")).toBe(1);
+    expect(amountOf("8.11")).toBe(811);
+    expect(amountOf("104.06")).toBe(10406);
+    // One decimal place is padded, not misread as one cent.
+    expect(amountOf("5.5")).toBe(550);
+    expect(amountOf("7")).toBe(700);
+    // Unparseable legacy values render as zero rather than taking the page
+    // down: visibly wrong beats quietly wrong.
+    expect(amountOf("not money")).toBe(0);
+    expect(amountOf("")).toBe(0);
   });
 
   it("drops counterparty identifiers the table never renders", () => {

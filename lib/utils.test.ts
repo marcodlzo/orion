@@ -1,11 +1,9 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  formatAmount,
   encryptId,
   decryptId,
   extractCustomerIdFromUrl,
-  getTransactionStatus,
   countTransactionCategories,
   removeSpecialCharacters,
   authFormSchema,
@@ -23,50 +21,16 @@ import {
  * specification. Do not defend it.
  */
 
-describe("formatAmount", () => {
-  it("formats a whole number as USD with two decimals", () => {
-    expect(formatAmount(1234)).toBe("$1,234.00");
-  });
-
-  it("formats zero", () => {
-    expect(formatAmount(0)).toBe("$0.00");
-  });
-
-  it("formats a negative amount", () => {
-    expect(formatAmount(-42.5)).toBe("-$42.50");
-  });
-
-  // DEFECT — money is a JS float here. 0.1 + 0.2 !== 0.3 in binary floating
-  // point, and repeated arithmetic drifts. The money-primitives milestone
-  // replaces this with integer minor units; when it does, this test is
-  // replaced, not relaxed.
-  it("DEFECT: accepts a float and inherits binary floating-point error", () => {
-    expect(formatAmount(0.1 + 0.2)).toBe("$0.30"); // rounded away by the formatter
-    expect(0.1 + 0.2).not.toBe(0.3); // the underlying value is still wrong
-  });
-
-  // DEFECT — the displayed amount is not the stored amount.
-  //
-  // Intl.NumberFormat rounds the shortest decimal that round-trips the double
-  // ("1.005"), half-up, giving $1.01. But the value actually held in memory is
-  // 1.00499999999999989342, which is strictly LESS than 1.005.
-  //
-  // So the UI shows a user $1.01 for a balance the system stores as ~1.00499.
-  // Sum a column of these and the displayed total will not equal the stored
-  // total. Reconciling against a rendered figure would drift.
-  //
-  // The fix is not a different formatter — it is integer minor units, so that
-  // no sub-cent value can exist to be rounded. Money-primitives milestone.
-  it("DEFECT: displays a cent the stored value does not contain", () => {
-    expect(formatAmount(1.005)).toBe("$1.01");
-    expect(1.005 < 1.005000000000001).toBe(true);
-    expect(Number("1.005".padEnd(1)) > 1.00499999999999989342).toBe(false);
-
-    // 1.999 is stored ABOVE 1.999 and still displays as a clean $2.00.
-    expect(formatAmount(1.999)).toBe("$2.00");
-    expect(1.999.toFixed(20).startsWith("1.99900000000000011")).toBe(true);
-  });
-});
+/**
+ * formatAmount's characterisation tests are GONE, because Milestone 11 landed
+ * and took the function with them. They
+ * documented a float formatter that displayed $1.01 for a stored 1.00499…, so
+ * a rendered column would not sum to the stored total.
+ *
+ * Its replacement, formatMinorUnits, takes exact integer minor units and is
+ * asserted in lib/domain/money.test.ts — including the cases these tests
+ * existed to record.
+ */
 
 describe("encryptId / decryptId", () => {
   it("round-trips a value", () => {
@@ -105,23 +69,16 @@ describe("extractCustomerIdFromUrl", () => {
   });
 });
 
-describe("getTransactionStatus", () => {
-  // DEFECT — status is derived from a clock, not from the provider. A transfer
-  // that Dwolla rejected still reads "Success" once it is 48 hours old. The
-  // transfer-state-machine milestone deletes this function.
-  it("DEFECT: derives status from a timestamp, never from provider state", () => {
-    const now = new Date();
-
-    const yesterday = new Date(now);
-    yesterday.setDate(now.getDate() - 1);
-    expect(getTransactionStatus(yesterday)).toBe("Processing");
-
-    const lastWeek = new Date(now);
-    lastWeek.setDate(now.getDate() - 7);
-    // A failed, returned or cancelled transfer reports "Success" here.
-    expect(getTransactionStatus(lastWeek)).toBe("Success");
-  });
-});
+/**
+ * getTransactionStatus's characterisation tests are GONE, because Milestone 11
+ * landed and the function with them. They asserted "Processing" under two days
+ * and "Success" after — a status derived from a clock. Real status now lives on
+ * the TransactionDTO and comes from the provider's pending flag or the transfer
+ * state machine, and is asserted in lib/dto/dto.test.ts.
+ *
+ * That is the intended lifecycle: a DEFECT test is replaced by a real invariant
+ * test when its milestone lands, never relaxed to keep passing.
+ */
 
 describe("countTransactionCategories", () => {
   it("counts and sorts categories by frequency, descending", () => {

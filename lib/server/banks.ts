@@ -18,21 +18,13 @@ import { NotFoundError } from "../repositories/errors";
 import { getTransactionsForOwnedBank } from "../repositories/transactions.repository";
 import { toAccountSummaryDTO } from "../dto/bank.dto";
 import {
-  toTransactionDTOFromSync,
+  toTransactionDTOFromStore,
   toTransactionDTOFromRecord,
 } from "../dto/transaction.dto";
-import { collectChanges, foldChanges } from "../plaid-sync/engine";
-import { plaidErrorCode, toSyncPage } from "../plaid-sync/adapter";
+// THE READ half of the Plaid store. The writer — which advances a cursor — is
+// deliberately unreachable from here; an architecture test enforces the split.
+import { listTransactionsForOwnedAccounts } from "../db/repositories/plaid-transactions.read";
 
-/**
- * How many pages a RENDER may walk.
- *
- * Not a correctness bound — the engine's cursor guard provides that. This is a
- * blast radius: a page render that walks an item's entire history is a slow page
- * at best and a timeout at worst, and the honest fix is the background sync, not
- * a bigger number here.
- */
-const RENDER_PATH_PAGE_LIMIT = 5;
 
 /**
  * OWNED — every account belonging to the authenticated actor.
@@ -53,7 +45,17 @@ export const getAccounts = async () => {
         const accountsResponse = await plaidClient.accountsGet({
           access_token: bank.accessToken,
         });
-        const accountData = accountsResponse.data.accounts[0];
+
+        // THE ACCOUNT THIS BANK RECORD IS FOR, not accounts[0]. An Item owns
+        // many accounts, and taking the first one showed the wrong balance
+        // against every linked account but one — silently, because the shape
+        // was always valid.
+        const accountData =
+          accountsResponse.data.accounts.find(
+            (a) => a.account_id === bank.accountId
+          ) ?? null;
+
+        if (!accountData) return null;
 
         // The bank record holds accessToken and fundingSourceUrl. It is passed
         // to the mapper rather than spread, so neither can ride along.
@@ -61,12 +63,26 @@ export const getAccounts = async () => {
       })
     );
 
-    const totalBanks = accounts.length;
-    const totalCurrentBalance = accounts.reduce((total, account) => {
-      return total + account.currentBalance;
-    }, 0);
+    // An account Plaid no longer reports is dropped rather than rendered as a
+    // zero balance, which would look like an emptied account.
+    const found = accounts.filter(
+      (account): account is NonNullable<typeof account> => account !== null
+    );
 
-    return parseStringify({ data: accounts, totalBanks, totalCurrentBalance });
+    const totalBanks = found.length;
+
+    // SUMMED IN INTEGER MINOR UNITS. This was a float sum across accounts, so
+    // the representation error compounded once per linked account.
+    const totalCurrentBalanceMinor = found.reduce(
+      (total, account) => total + account.currentBalanceMinor,
+      0
+    );
+
+    return parseStringify({
+      data: found,
+      totalBanks,
+      totalCurrentBalanceMinor,
+    });
   } catch (error) {
     console.error("An error occurred while getting the accounts:", error);
   }
@@ -91,7 +107,12 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
     const accountsResponse = await plaidClient.accountsGet({
       access_token: bank.accessToken,
     });
-    const accountData = accountsResponse.data.accounts[0];
+
+    // The account this bank record names, not accounts[0].
+    const accountData = accountsResponse.data.accounts.find(
+      (a) => a.account_id === bank.accountId
+    );
+    if (!accountData) throw new NotFoundError("Account not found");
 
     // get transfer transactions from appwrite
     // Ownership was proven above; this reads that bank's history.
@@ -108,14 +129,20 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
         )
     );
 
-    const transactions = await getTransactions({
-      accessToken: bank.accessToken,
-    });
+    // FROM THE SYNCED STORE, NOT FROM PLAID. This used to call transactionsSync
+    // during SSR — a page render driving provider sync, re-walking an item's
+    // whole history every time somebody loaded the page.
+    //
+    // OWNERSHIP WAS PROVEN ABOVE. `bank.accountId` came from a document the
+    // ownership-scoped query returned for THIS actor, so it is the one account
+    // id it is safe to read by. Passing the URL parameter through instead would
+    // be an IDOR.
+    const storedRows = await listTransactionsForOwnedAccounts([bank.accountId]);
+    const transactions = storedRows.map(toTransactionDTOFromStore);
 
     const account = toAccountSummaryDTO({ plaidAccount: accountData, bank });
 
-    // sort transactions by date such that the most recent transaction is first
-      const allTransactions = [...transactions, ...transferTransactions].sort(
+    const allTransactions = [...transactions, ...transferTransactions].sort(
       (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()
     );
 
@@ -125,65 +152,5 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
     });
   } catch (error) {
     console.error("An error occurred while getting the account:", error);
-  }
-};
-
-/**
- * Plaid transactions for one access token, for display.
- *
- * WHAT THIS USED TO BE, and why it could not work:
- *
- *   while (hasMore) {
- *     const response = await plaidClient.transactionsSync({ access_token });
- *     transactions = response.data.added.map(...);   // overwrote each page
- *     hasMore = data.has_more;                       // cursor never advanced
- *   }
- *
- * No cursor was sent, so Plaid returned the same first page every time and
- * `has_more` never became false — an infinite loop against a paid API. And each
- * pass ASSIGNED rather than accumulated, so even a terminating version would
- * have kept only the last page. `modified` and `removed` were ignored entirely.
- *
- * It now walks pages through the shared engine: the cursor advances, pages
- * accumulate, an unchanged cursor aborts, and the walk is bounded.
- *
- * STILL ON THE RENDER PATH, AND STILL WRONG FOR THAT REASON. This starts from no
- * cursor on every call, so it re-fetches an item's whole history during SSR. The
- * cursor-persisting sync that fixes this properly lives in `lib/plaid-sync/` and
- * runs outside any request; wiring the UI to read from that store is the UI
- * rebuild's job. Do not add callers, and do not "optimise" this by persisting a
- * cursor here — a render path must not advance sync state.
- */
-export const getTransactions = async ({
-  accessToken,
-}: getTransactionsProps) => {
-  try {
-    const changes = await collectChanges(
-      async (cursor) => {
-        const response = await plaidClient.transactionsSync(
-          cursor === null
-            ? { access_token: accessToken }
-            : { access_token: accessToken, cursor }
-        );
-        return toSyncPage(response.data as unknown as Record<string, unknown>);
-      },
-      null,
-      // A display read has no business walking a decade of history during a
-      // page render. Bounded far below the engine's own ceiling.
-      { maxPages: RENDER_PATH_PAGE_LIMIT }
-    );
-
-    const { upserts } = foldChanges(changes);
-
-    // Mapped to the display DTO. Retracted transactions are already excluded by
-    // the fold, so a removal in a later page cannot resurface here.
-    return parseStringify(upserts.map(toTransactionDTOFromSync));
-  } catch (error) {
-    // The code, never the provider error: a Plaid error echoes the request, and
-    // the request carries the access token.
-    console.error(
-      "An error occurred while getting transactions:",
-      plaidErrorCode(error) ?? "UNKNOWN"
-    );
   }
 };

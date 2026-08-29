@@ -182,3 +182,43 @@ export function toDecimalString(money: Money): string {
   const cents = abs % MINOR_PER_MAJOR;
   return `${negative ? "-" : ""}${whole}.${String(cents).padStart(USD_SCALE, "0")}`;
 }
+
+/**
+ * Format exact minor units for display.
+ *
+ * TAKES INTEGER MINOR UNITS, NOT A FLOAT. `formatAmount(amount: number)` in
+ * `lib/utils.ts` took dollars as a double and was the last place a float
+ * survived in the display path: every balance and every transaction amount went
+ * through it, so a value that could not be represented exactly was rendered
+ * with whatever the double happened to hold.
+ *
+ * The grouping and the currency symbol come from Intl, but the DIGITS come from
+ * the integer — `toDecimalString` builds them by arithmetic on minor units, and
+ * Intl is asked to format a value that is already exactly right rather than to
+ * round one that is not.
+ */
+export function formatMinorUnits(
+  amountMinor: number,
+  options: { currency?: Currency; signDisplay?: "auto" | "never" } = {}
+): string {
+  if (!Number.isSafeInteger(amountMinor)) {
+    throw new InvalidMoneyError(
+      `amount must be an integer number of minor units; received ${amountMinor}`
+    );
+  }
+
+  const money: Money = {
+    amountMinor: options.signDisplay === "never" ? Math.abs(amountMinor) : amountMinor,
+    currency: options.currency ?? "USD",
+  };
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: money.currency,
+    minimumFractionDigits: USD_SCALE,
+    maximumFractionDigits: USD_SCALE,
+    // The decimal string is exact; parsing it back to a Number is safe because
+    // Intl needs a number and this one has at most two places and a magnitude
+    // the integer check above already bounded.
+  }).format(Number(toDecimalString(money)));
+}

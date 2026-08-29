@@ -12,7 +12,8 @@ import {
   SelectLabel,
   SelectTrigger,
 } from "@/components/ui/select";
-import { formUrlQuery, formatAmount } from "@/lib/utils";
+import { formUrlQuery } from "@/lib/utils";
+import { formatMinorUnits } from "@/lib/domain/money";
 
 export const BankDropdown = ({
   accounts = [],
@@ -72,7 +73,7 @@ export const BankDropdown = ({
               <div className="flex flex-col ">
                 <p className="text-16 font-medium">{account.name}</p>
                 <p className="text-14 font-medium text-blue-600">
-                  {formatAmount(account.currentBalance)}
+                  {formatMinorUnits(account.currentBalanceMinor)}
                 </p>
               </div>
             </SelectItem>

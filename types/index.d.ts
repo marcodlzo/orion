@@ -52,7 +52,7 @@ declare type NewUserParams = {
 declare type Account = {
   id: string;
   availableBalance: number;
-  currentBalance: number;
+  currentBalanceMinor: number;
   officialName: string;
   mask: string;
   institutionId: string;
@@ -204,7 +204,7 @@ declare interface BankTabItemProps {
 declare interface TotalBalanceBoxProps {
   accounts: import("@/lib/dto/bank.dto").AccountSummaryDTO[];
   totalBanks: number;
-  totalCurrentBalance: number;
+  totalCurrentBalanceMinor: number;
 }
 
 declare interface FooterProps {

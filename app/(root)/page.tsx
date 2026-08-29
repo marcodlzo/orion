@@ -31,7 +31,7 @@ const Home = async ({ searchParams: { id, page } }: SearchParamProps) => {
           <TotalBalanceBox 
             accounts={accountsData}
             totalBanks={accounts?.totalBanks}
-            totalCurrentBalance={accounts?.totalCurrentBalance}
+            totalCurrentBalanceMinor={accounts?.totalCurrentBalanceMinor}
           />
         </header>
 

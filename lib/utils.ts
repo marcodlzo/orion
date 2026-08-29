@@ -66,15 +66,15 @@ export const formatDateTime = (dateString: Date) => {
   };
 };
 
-export function formatAmount(amount: number): string {
-  const formatter = new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-  });
-
-  return formatter.format(amount);
-}
+/**
+ * REMOVED IN MILESTONE 11: formatAmount(amount: number).
+ *
+ * It took dollars as a double and was the last place a float survived in the
+ * display path — every balance and every transaction amount went through it.
+ * Use `formatMinorUnits` from `lib/domain/money`, which takes exact integer
+ * minor units and builds the digits by arithmetic rather than asking Intl to
+ * round a value that is already wrong.
+ */
 
 export const parseStringify = (value: any) => JSON.parse(JSON.stringify(value));
 
@@ -189,13 +189,16 @@ export function decryptId(id: string) {
   return atob(id);
 }
 
-export const getTransactionStatus = (date: Date) => {
-  const today = new Date();
-  const twoDaysAgo = new Date(today);
-  twoDaysAgo.setDate(today.getDate() - 2);
-
-  return date > twoDaysAgo ? "Processing" : "Success";
-};
+/**
+ * REMOVED IN MILESTONE 11: getTransactionStatus.
+ *
+ * It returned "Processing" when a date was under two days old and "Success"
+ * otherwise, so a failed transfer displayed as Success once it was 48 hours old.
+ * Status now comes from real state — the provider's pending flag for a bank
+ * transaction, the state machine for a transfer — and is carried on the DTO.
+ *
+ * Do not reintroduce it. Provider state is never inferred from a clock.
+ */
 
 export const authFormSchema = (type: string) => z.object({
   // sign up

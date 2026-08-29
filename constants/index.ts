@@ -113,3 +113,66 @@ export const transactionCategoryStyles = {
     chipBackgroundColor: "bg-inherit",
   },
 };
+
+/**
+ * Styling for a transaction's REAL status.
+ *
+ * Replaces the "Processing" / "Success" pair, which were not statuses at all —
+ * `getTransactionStatus()` returned them based on whether the date was under two
+ * days old, so a failed transfer rendered as Success after 48 hours.
+ *
+ * These keys are the actual states: the provider's pending flag for a bank
+ * transaction, and the transfer state machine for a transfer. Every one of them
+ * is reachable, and nothing here is derived from a clock.
+ */
+export const transactionStatusStyles = {
+  pending: {
+    borderColor: "border-[#F2F4F7]",
+    backgroundColor: "bg-gray-500",
+    textColor: "text-[#344054]",
+    chipBackgroundColor: "bg-[#F2F4F7]",
+    label: "Pending",
+  },
+  posted: {
+    borderColor: "border-[#12B76A]",
+    backgroundColor: "bg-[#12B76A]",
+    textColor: "text-[#027A48]",
+    chipBackgroundColor: "bg-[#ECFDF3]",
+    label: "Posted",
+  },
+  submitted: {
+    borderColor: "border-[#F2F4F7]",
+    backgroundColor: "bg-gray-500",
+    textColor: "text-[#344054]",
+    chipBackgroundColor: "bg-[#F2F4F7]",
+    label: "Submitted",
+  },
+  settled: {
+    borderColor: "border-[#12B76A]",
+    backgroundColor: "bg-[#12B76A]",
+    textColor: "text-[#027A48]",
+    chipBackgroundColor: "bg-[#ECFDF3]",
+    label: "Settled",
+  },
+  failed: {
+    borderColor: "border-[#F04438]",
+    backgroundColor: "bg-[#F04438]",
+    textColor: "text-[#B42318]",
+    chipBackgroundColor: "bg-[#FEF3F2]",
+    label: "Failed",
+  },
+  returned: {
+    borderColor: "border-[#F04438]",
+    backgroundColor: "bg-[#F04438]",
+    textColor: "text-[#B42318]",
+    chipBackgroundColor: "bg-[#FEF3F2]",
+    label: "Returned",
+  },
+  reversed: {
+    borderColor: "border-[#DC6803]",
+    backgroundColor: "bg-[#DC6803]",
+    textColor: "text-[#B54708]",
+    chipBackgroundColor: "bg-[#FFFAEB]",
+    label: "Reversed",
+  },
+} as const;

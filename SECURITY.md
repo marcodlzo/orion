@@ -64,6 +64,10 @@ regressed. Nothing here is claimed on the strength of a code reading alone.
 | No holds; an available balance was not distinguished from a ledger balance | Milestone 8 | A hold is placed in the same transaction as the idempotency claim and committed BEFORE the provider is called; captured on settlement, released on failure or return, always in the same transaction as the terminal state. Available balance is derived on every read — no stored balance and no stored available balance exist, and a test fails if either is added. `holds.db.test.ts` |
 | A return arriving after settlement was silently discarded, leaving the ledger counting money that had come back | Milestone 9 | `settled -> reversed` is a real transition, and it posts COMPENSATING entries in the same transaction. The originals are never touched — the entry triggers make an edit impossible — and the compensating amounts are derived from the original rows rather than supplied by a caller. A posting is reversed at most once, enforced by a unique constraint, and a reversal cannot itself be reversed. `reversals.db.test.ts` |
 | No audit trail of financial state changes | Milestone 9 | An AFTER UPDATE trigger on `transfers` logs every state change, so the trail cannot be bypassed by a new code path or by a hand-written UPDATE — asserted by changing state in psql and checking the row appears. Append-only. It carries no actor identifier and no provider payload; a test asserts the exact column list. |
+| Transaction status was derived from a clock — a failed transfer displayed as "Success" after 48 hours | Milestone 11 | `getTransactionStatus()` is deleted. Status is carried on the DTO and comes from the provider's `pending` flag or the transfer state machine. Its characterisation tests were removed rather than relaxed, which is the documented lifecycle. `dto.test.ts` |
+| Money was a float through the entire display path, so a rendered column did not sum to the stored total | Milestone 11 | `formatAmount(amount: number)` is deleted. Balances and transaction amounts are exact integer minor units to the point of display, and `formatMinorUnits` REFUSES a float rather than rounding it. `money.test.ts` |
+| Plaid was called during SSR, so a page render drove provider sync | Milestone 11 | History reads the synced store. An architecture test asserts no render path reaches any sync module, and that the request-reachable read module contains no write — the half that advances a cursor stays operator-only. |
+| Account linking discarded every account on an Item but the first | Milestone 11 | Every depository account gets its own funding source and bank record. Non-depository accounts are skipped deliberately and counted, and one account's failure no longer blocks the rest. |
 | `transactionsSync` called with no cursor inside `while (has_more)` — an infinite loop against a paid API | Milestone 10 | The loop is a pure engine: the cursor is sent, advanced and returned, and an unchanged cursor with more pages promised ABORTS instead of looping. A bounded page ceiling backstops a provider that advances forever. `engine.test.ts` |
 | Sync pages overwrote each other, and `modified`/`removed` were ignored | Milestone 10 | All three change lists accumulate across pages and are folded into a net effect per transaction, so an add-then-remove within one run does not depend on the applier's ordering. Modifications update; removals soft-delete. `plaid-sync.db.test.ts` |
 | No cursor was persisted, so every call re-fetched an item's entire history | Milestone 10 | The cursor and the transactions it produced are written in ONE transaction — asserted by inducing a failure between them and checking neither landed and the cursor stayed put. Cursor-first loses data permanently; data-first reprocesses. |
@@ -84,11 +88,9 @@ They are real, and this application should not be exposed to untrusted users.
 | Finding | Severity | Milestone |
 |---|---|---|
 | Nothing credits a customer's ledger account, so the solvency check is an exposure cap rather than a balance check | Medium | unscheduled |
-| Plaid data is fetched during page render — correct pagination now, but no persistence, so SSR re-walks history | Medium | 11 |
-| Account linking keeps only the first account on a Plaid Item; the rest are discarded | Medium | 11 |
+| No end-to-end tests; the server-owned transfer flow is not driven end to end | Medium | unscheduled |
 | No rate limiting on authentication or money movement | Medium | unscheduled |
 | `shareableId` is base64 encoding presented as encryption | Medium | unscheduled |
-| Transaction status derived from a timestamp in the Appwrite-backed table | Medium | 11 |
 | Provider credentials stored in plaintext Appwrite documents | High | unscheduled |
 
 Three rows now read **unscheduled**, and that is a correction rather than a
@@ -115,6 +117,11 @@ the signature verification that makes the webhook path trustworthy — and
 silently correcting drift destroys the evidence of what caused it, which is the
 only thing that can tell an operator whether they are looking at a bug or a
 provider incident. The report says so in its own output.
+
+Milestone 11 moved it off the render path, closing what Milestone 10 left open.
+The paragraph below is kept because it records what was true between the two,
+and because the guard it describes is still what prevents the coupling coming
+back.
 
 Milestone 10 fixed the sync ITSELF but did not move it off the render path.
 `getTransactions` now paginates correctly, accumulates, and terminates — the

@@ -3,7 +3,7 @@ import { Pagination } from '@/components/Pagination';
 import TransactionsTable from '@/components/TransactionsTable';
 import { getAccount, getAccounts } from '@/lib/server/banks';
 import { getLoggedInUser } from '@/lib/actions/user.actions';
-import { formatAmount } from '@/lib/utils';
+import { formatMinorUnits } from '@/lib/domain/money';
 import React from 'react'
 
 const TransactionHistory = async ({ searchParams: { id, page }}:SearchParamProps) => {
@@ -51,7 +51,7 @@ const currentTransactions = account?.transactions.slice(
           
           <div className='transactions-account-balance'>
             <p className="text-14">Current balance</p>
-            <p className="text-24 text-center font-bold">{formatAmount(account?.data.currentBalance)}</p>
+            <p className="text-24 text-center font-bold">{formatMinorUnits(account?.data.currentBalanceMinor ?? 0)}</p>
           </div>
         </div>
 

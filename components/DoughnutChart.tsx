@@ -9,7 +9,10 @@ ChartJS.register(ArcElement, Tooltip, Legend);
 
 const DoughnutChart = ({ accounts }: DoughnutChartProps) => {
   const accountNames = accounts.map((a) => a.name);
-  const balances = accounts.map((a) => a.currentBalance)
+  // Chart.js needs a number, and a chart's proportions do not depend on cent
+  // precision — but the conversion happens HERE, at the last possible point,
+  // rather than the DTO carrying a float all the way down for this one reader.
+  const balances = accounts.map((a) => a.currentBalanceMinor / 100)
 
   const data = {
     datasets: [

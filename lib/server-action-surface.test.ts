@@ -1083,6 +1083,10 @@ describe("migration tooling stays out of the request path", () => {
     "lib/db/repositories/webhook-events.repository.ts",
     "lib/db/repositories/ledger.repository.ts",
     "lib/db/repositories/holds.repository.ts",
+    // Milestone 11: transaction history now comes from the synced store instead
+    // of a live Plaid call during SSR. READ-ONLY by construction — the module
+    // that advances a cursor is a different file and stays operator-only.
+    "lib/db/repositories/plaid-transactions.read.ts",
     "lib/db/pool.ts",
     "lib/db/errors.ts",
   ];
@@ -1255,23 +1259,40 @@ describe("migration tooling stays out of the request path", () => {
     expect(importers).toEqual(["scripts/db-reconcile.ts"]);
   });
 
-  it("the render path paginates but never persists a cursor", () => {
-    // `getTransactions` is still called during SSR — that coupling belongs to
-    // the UI rebuild. What must NOT come back is the render path owning sync
-    // state: a page load that advances a cursor makes two concurrent renders
-    // race it, and makes a render's failure lose transactions permanently.
+  it("NO render path calls Plaid for transactions at all", () => {
+    // Milestone 10 made the render-path loop correct; Milestone 11 removed it.
+    // Transaction history is read from the synced store, so a page render does
+    // no Plaid pagination — not a bounded amount, none.
     //
-    // It may use the pure engine (correct pagination, bounded, terminating).
-    // It may not reach anything that stores a cursor.
+    // The earlier version of this test asserted the render path DID reach the
+    // pagination engine, which was right while the loop still existed there.
+    // Asserting it now would forbid the fix.
     const banks = graph.get("lib/server/banks.ts");
     expect(banks, "the render-path bank reader must exist").toBeTruthy();
 
     const reachable = closure(["lib/server/banks.ts"]);
 
-    expect(reachable.has("lib/plaid-sync/engine.ts")).toBe(true);
+    expect(reachable.has("lib/plaid-sync/engine.ts")).toBe(false);
     expect(reachable.has("lib/plaid-sync/sync.ts")).toBe(false);
     expect(reachable.has("lib/db/repositories/plaid-items.repository.ts")).toBe(
       false
+    );
+  });
+
+  it("the request-path Plaid read issues no write", () => {
+    // The read half of the store is reachable from a request; the half that
+    // advances a cursor is not. That split only holds if the reachable half
+    // genuinely cannot write — a render that moves sync state lets two
+    // concurrent page loads race the same Item.
+    const read = graph.get("lib/db/repositories/plaid-transactions.read.ts");
+    expect(read, "the request-path Plaid read must exist").toBeTruthy();
+
+    const WRITE =
+      /\b(insert\s+into|update\s+"?\w|delete\s+from|truncate\b|drop\s+table|alter\s+table|set_config)/i;
+
+    expect(WRITE.test(read!.code)).toBe(false);
+    expect(read!.imports).not.toContain(
+      "lib/db/repositories/plaid-items.repository.ts"
     );
   });
 

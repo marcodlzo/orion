@@ -1,3 +1,5 @@
+import { toMinorUnits } from "../plaid-sync/adapter";
+
 /**
  * Read DTOs for bank/account display.
  *
@@ -15,7 +17,7 @@
  *   officialName     transaction-history detail header
  *   mask             BankCard, transaction-history detail
  *   type / subtype   BankInfo styling
- *   currentBalance   BankCard, BankInfo, BankDropdown, DoughnutChart, totals
+ *   currentBalanceMinor  BankCard, BankInfo, BankDropdown, DoughnutChart, totals
  *   shareableId      the recipient reference a user copies to be paid
  *
  * Dropped because no rendering path reads them:
@@ -39,7 +41,15 @@ export type AccountSummaryDTO = {
   mask: string;
   type: string;
   subtype: string;
-  currentBalance: number;
+  /**
+   * EXACT INTEGER MINOR UNITS, converted at the adapter edge.
+   *
+   * This was `currentBalance: number` — a float, straight from Plaid's JSON —
+   * and it was summed across accounts for the dashboard total, so the error
+   * compounded per account. Plaid's number is converted once, by the same
+   * function the sync uses, and no float exists past that point.
+   */
+  currentBalanceMinor: number;
   shareableId: string;
 };
 
@@ -51,12 +61,25 @@ export const ACCOUNT_SUMMARY_DTO_FIELDS = [
   "mask",
   "type",
   "subtype",
-  "currentBalance",
+  "currentBalanceMinor",
   "shareableId",
 ] as const;
 
 const str = (value: unknown): string => (typeof value === "string" ? value : "");
-const num = (value: unknown): number => (typeof value === "number" ? value : 0);
+
+/**
+ * A Plaid balance to exact minor units.
+ *
+ * A missing balance is 0 rather than a throw: an account Plaid reports without a
+ * current balance still renders, and refusing to build the DTO would take the
+ * whole dashboard down for one incomplete account. A balance that is PRESENT but
+ * unconvertible does throw, because silently showing 0 for real money is worse
+ * than an error.
+ */
+const balanceMinor = (value: unknown): number => {
+  if (value === null || value === undefined) return 0;
+  return toMinorUnits(value);
+};
 
 /**
  * Build an account summary from a Plaid account plus the owning bank record.
@@ -80,7 +103,7 @@ export function toAccountSummaryDTO(input: {
     mask: str(a.mask),
     type: str(a.type),
     subtype: str(a.subtype),
-    currentBalance: num(balances.current),
+    currentBalanceMinor: balanceMinor(balances.current),
     shareableId: str(b.shareableId),
   };
 }

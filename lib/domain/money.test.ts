@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  formatMinorUnits,
   InvalidMoneyError,
   ZERO_USD,
   addMoney,
@@ -238,5 +239,64 @@ describe("usdFromMinor", () => {
     // them. Keeping those concerns separate matters once a ledger exists.
     expect(usdFromMinor(-500).amountMinor).toBe(-500);
     expect(toDecimalString(usdFromMinor(-500))).toBe("-5.00");
+  });
+});
+
+/**
+ * THE REPLACEMENT FOR formatAmount's CHARACTERISATION TESTS.
+ *
+ * Those recorded a float formatter that displayed $1.01 for a value stored as
+ * 1.00499999999999989342 — so a rendered column did not sum to the stored total,
+ * and reconciling against a displayed figure drifted. They were deleted when
+ * Milestone 11 landed, and these assert the behaviour that replaced them.
+ */
+describe("formatMinorUnits", () => {
+  it("formats exact minor units", () => {
+    expect(formatMinorUnits(0)).toBe("$0.00");
+    expect(formatMinorUnits(1)).toBe("$0.01");
+    expect(formatMinorUnits(100)).toBe("$1.00");
+    expect(formatMinorUnits(123456)).toBe("$1,234.56");
+  });
+
+  it("formats a negative amount", () => {
+    expect(formatMinorUnits(-4250)).toBe("-$42.50");
+  });
+
+  it("can suppress the sign for a caller that renders direction itself", () => {
+    expect(formatMinorUnits(-4250, { signDisplay: "never" })).toBe("$42.50");
+    expect(formatMinorUnits(4250, { signDisplay: "never" })).toBe("$42.50");
+  });
+
+  it("CANNOT display a cent the value does not contain", () => {
+    // The defect the old formatter had, stated as an invariant: there is no
+    // sub-cent value to round, because the input is an integer count of cents.
+    // 1.005 dollars cannot be expressed at all — the caller must choose 100 or
+    // 101, and whichever it chooses is what renders.
+    expect(formatMinorUnits(100)).toBe("$1.00");
+    expect(formatMinorUnits(101)).toBe("$1.01");
+  });
+
+  it("renders a column that sums to the stored total", () => {
+    // The property the float formatter broke. Three amounts that are awkward as
+    // doubles: their displayed values and their stored values agree exactly.
+    const amounts = [1005, 1999, 435];
+    const total = amounts.reduce((sum, a) => sum + a, 0);
+
+    expect(amounts.map((a) => formatMinorUnits(a))).toEqual([
+      "$10.05",
+      "$19.99",
+      "$4.35",
+    ]);
+    expect(formatMinorUnits(total)).toBe("$34.39");
+    expect(total).toBe(3439);
+  });
+
+  it("REFUSES a float rather than rounding it", () => {
+    // The whole point: a caller that still holds dollars cannot pass them in by
+    // accident and get a plausible-looking answer.
+    expect(() => formatMinorUnits(12.34)).toThrow(InvalidMoneyError);
+    expect(() => formatMinorUnits(0.1 + 0.2)).toThrow(InvalidMoneyError);
+    expect(() => formatMinorUnits(Number.NaN)).toThrow(InvalidMoneyError);
+    expect(() => formatMinorUnits(Number.MAX_VALUE)).toThrow(InvalidMoneyError);
   });
 });
