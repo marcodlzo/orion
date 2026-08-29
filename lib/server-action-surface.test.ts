@@ -1432,6 +1432,11 @@ describe("migration tooling stays out of the request path", () => {
       .sort();
 
     expect(importers).toEqual([
+      // Inside the crypto boundary itself: the self-test proves the configured
+      // keyring can actually protect a value. It is listed here rather than
+      // allowlisting the operator script, so encrypt/decrypt stays confined to
+      // lib/crypto, the storage boundary, and the migration.
+      "lib/crypto/self-test.ts",
       "lib/migration/credential-encryption.ts",
       "lib/repositories/banks.repository.ts",
     ]);

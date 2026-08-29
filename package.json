@@ -21,6 +21,7 @@
     "db:verify": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-verify.ts",
     "db:reconcile": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-reconcile.ts",
     "plaid:sync": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/plaid-sync.ts",
+    "credentials:check": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/check-credential-keys.ts",
     "credentials:encrypt": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/encrypt-credentials.ts",
     "credentials:encrypt:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/encrypt-credentials.ts --commit"
   },
