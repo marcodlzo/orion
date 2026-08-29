@@ -432,10 +432,12 @@ describe("L. timestamps are timezone aware", () => {
     // slipping in with untyped timestamps. It has to be updated deliberately
     // each time the schema grows, which is the point.
     //
-    // banking_customers, linked_accounts, transfers, ledger_accounts: two each.
-    // ledger_transactions and ledger_entries are append-only, so they carry
-    // created_at only.
-    expect(rows.length).toBe(10);
+    // banking_customers, linked_accounts, transfers, ledger_accounts,
+    // plaid_items: two each. ledger_transactions and ledger_entries are
+    // append-only, so they carry created_at only. plaid_transactions records
+    // when it was FIRST SEEN rather than created, so it contributes updated_at
+    // alone.
+    expect(rows.length).toBe(13);
     for (const row of rows) {
       // `timestamp without time zone` silently reinterprets values by server
       // locale, which for financial records is a correctness bug.
@@ -444,6 +446,35 @@ describe("L. timestamps are timezone aware", () => {
         `${row.table_name}.${row.column_name}`
       ).toBe("timestamp with time zone");
     }
+  });
+
+  it("no column anywhere is a naive timestamp, whatever it is called", async () => {
+    // THE HOLE THE COUNT ABOVE DOES NOT CLOSE. It only inspects columns named
+    // created_at or updated_at, so a table whose timestamps are named for their
+    // meaning — received_at, placed_at, occurred_at, settled_at, first_seen_at —
+    // was never type-checked at all. Three tables added since that guard was
+    // written fell straight through it.
+    //
+    // This one asks the schema the question directly: is anything, anywhere, a
+    // timestamp without a time zone?
+    const { rows } = await pool.query<{
+      table_name: string;
+      column_name: string;
+    }>(
+      // `pgmigrations` is node-pg-migrate's own bookkeeping, created by the
+      // tool and not part of this schema. Excluded BY NAME rather than by a
+      // pattern, so a table of ours can never be excused by accident.
+      `SELECT table_name, column_name FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name <> 'pgmigrations'
+          AND data_type = 'timestamp without time zone'
+        ORDER BY table_name, column_name`
+    );
+
+    expect(
+      rows.map((r) => `${r.table_name}.${r.column_name}`),
+      "naive timestamps reinterpret by server locale"
+    ).toEqual([]);
   });
 
   it("advances updated_at on update, via the database not the application", async () => {

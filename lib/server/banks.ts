@@ -18,9 +18,21 @@ import { NotFoundError } from "../repositories/errors";
 import { getTransactionsForOwnedBank } from "../repositories/transactions.repository";
 import { toAccountSummaryDTO } from "../dto/bank.dto";
 import {
-  toTransactionDTOFromPlaid,
+  toTransactionDTOFromSync,
   toTransactionDTOFromRecord,
 } from "../dto/transaction.dto";
+import { collectChanges, foldChanges } from "../plaid-sync/engine";
+import { plaidErrorCode, toSyncPage } from "../plaid-sync/adapter";
+
+/**
+ * How many pages a RENDER may walk.
+ *
+ * Not a correctness bound — the engine's cursor guard provides that. This is a
+ * blast radius: a page render that walks an item's entire history is a slow page
+ * at best and a timeout at worst, and the honest fix is the background sync, not
+ * a bigger number here.
+ */
+const RENDER_PATH_PAGE_LIMIT = 5;
 
 /**
  * OWNED — every account belonging to the authenticated actor.
@@ -116,31 +128,62 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
   }
 };
 
-// Get transactions
+/**
+ * Plaid transactions for one access token, for display.
+ *
+ * WHAT THIS USED TO BE, and why it could not work:
+ *
+ *   while (hasMore) {
+ *     const response = await plaidClient.transactionsSync({ access_token });
+ *     transactions = response.data.added.map(...);   // overwrote each page
+ *     hasMore = data.has_more;                       // cursor never advanced
+ *   }
+ *
+ * No cursor was sent, so Plaid returned the same first page every time and
+ * `has_more` never became false — an infinite loop against a paid API. And each
+ * pass ASSIGNED rather than accumulated, so even a terminating version would
+ * have kept only the last page. `modified` and `removed` were ignored entirely.
+ *
+ * It now walks pages through the shared engine: the cursor advances, pages
+ * accumulate, an unchanged cursor aborts, and the walk is bounded.
+ *
+ * STILL ON THE RENDER PATH, AND STILL WRONG FOR THAT REASON. This starts from no
+ * cursor on every call, so it re-fetches an item's whole history during SSR. The
+ * cursor-persisting sync that fixes this properly lives in `lib/plaid-sync/` and
+ * runs outside any request; wiring the UI to read from that store is the UI
+ * rebuild's job. Do not add callers, and do not "optimise" this by persisting a
+ * cursor here — a render path must not advance sync state.
+ */
 export const getTransactions = async ({
   accessToken,
 }: getTransactionsProps) => {
-  let hasMore = true;
-  let transactions: any = [];
-
   try {
-    // Iterate through each page of new transaction updates for item
-    while (hasMore) {
-      const response = await plaidClient.transactionsSync({
-        access_token: accessToken,
-      });
+    const changes = await collectChanges(
+      async (cursor) => {
+        const response = await plaidClient.transactionsSync(
+          cursor === null
+            ? { access_token: accessToken }
+            : { access_token: accessToken, cursor }
+        );
+        return toSyncPage(response.data as unknown as Record<string, unknown>);
+      },
+      null,
+      // A display read has no business walking a decade of history during a
+      // page render. Bounded far below the engine's own ceiling.
+      { maxPages: RENDER_PATH_PAGE_LIMIT }
+    );
 
-      const data = response.data;
+    const { upserts } = foldChanges(changes);
 
-      // Mapped to the display DTO. The sync loop's defects (no cursor, results
-      // overwritten each page) are deliberately untouched by this phase.
-      transactions = response.data.added.map(toTransactionDTOFromPlaid);
-
-      hasMore = data.has_more;
-    }
-
-    return parseStringify(transactions);
+    // Mapped to the display DTO. Retracted transactions are already excluded by
+    // the fold, so a removal in a later page cannot resurface here.
+    return parseStringify(upserts.map(toTransactionDTOFromSync));
   } catch (error) {
-    console.error("An error occurred while getting the accounts:", error);
+    // The code, never the provider error: a Plaid error echoes the request, and
+    // the request carries the access token.
+    console.error(
+      "An error occurred while getting transactions:",
+      plaidErrorCode(error) ?? "UNKNOWN"
+    );
   }
 };

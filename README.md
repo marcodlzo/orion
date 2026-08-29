@@ -97,8 +97,8 @@ enabled, which is how five type errors shipped.
 | 7 | Transfer state machine and provider webhooks | done |
 | 8 | Holds, available vs ledger balance, concurrency safety | done |
 | 9 | Reconciliation, audit trail, reversals | done |
-| 10 | Plaid sync rebuild — cursor persistence, full change handling | next |
-| 11 | UI rebuild | |
+| 10 | Plaid sync rebuild — cursor persistence, full change handling | done |
+| 11 | UI rebuild | next |
 
 **Milestone 2** shrank the server-action surface from 24 exports to 7, moved
 identity resolution into the session, pushed ownership checks into the

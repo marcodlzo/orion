@@ -64,6 +64,10 @@ regressed. Nothing here is claimed on the strength of a code reading alone.
 | No holds; an available balance was not distinguished from a ledger balance | Milestone 8 | A hold is placed in the same transaction as the idempotency claim and committed BEFORE the provider is called; captured on settlement, released on failure or return, always in the same transaction as the terminal state. Available balance is derived on every read — no stored balance and no stored available balance exist, and a test fails if either is added. `holds.db.test.ts` |
 | A return arriving after settlement was silently discarded, leaving the ledger counting money that had come back | Milestone 9 | `settled -> reversed` is a real transition, and it posts COMPENSATING entries in the same transaction. The originals are never touched — the entry triggers make an edit impossible — and the compensating amounts are derived from the original rows rather than supplied by a caller. A posting is reversed at most once, enforced by a unique constraint, and a reversal cannot itself be reversed. `reversals.db.test.ts` |
 | No audit trail of financial state changes | Milestone 9 | An AFTER UPDATE trigger on `transfers` logs every state change, so the trail cannot be bypassed by a new code path or by a hand-written UPDATE — asserted by changing state in psql and checking the row appears. Append-only. It carries no actor identifier and no provider payload; a test asserts the exact column list. |
+| `transactionsSync` called with no cursor inside `while (has_more)` — an infinite loop against a paid API | Milestone 10 | The loop is a pure engine: the cursor is sent, advanced and returned, and an unchanged cursor with more pages promised ABORTS instead of looping. A bounded page ceiling backstops a provider that advances forever. `engine.test.ts` |
+| Sync pages overwrote each other, and `modified`/`removed` were ignored | Milestone 10 | All three change lists accumulate across pages and are folded into a net effect per transaction, so an add-then-remove within one run does not depend on the applier's ordering. Modifications update; removals soft-delete. `plaid-sync.db.test.ts` |
+| No cursor was persisted, so every call re-fetched an item's entire history | Milestone 10 | The cursor and the transactions it produced are written in ONE transaction — asserted by inducing a failure between them and checking neither landed and the cursor stayed put. Cursor-first loses data permanently; data-first reprocesses. |
+| A Plaid Item that stopped working was indistinguishable from one with no activity | Milestone 10 | `login_required` and `error` are explicit item states carrying the provider's error CODE. The message is never read: a Plaid error message echoes the request, and the request carries the access token. |
 | No reconciliation — drift between the provider and the ledger was undetectable | Milestone 9 | `npm run db:reconcile` compares the ledger against itself and, optionally, against Dwolla. It REPORTS AND NEVER REPAIRS: an architecture test scans every module under `lib/reconciliation/` for a write of any form, and that guard is itself mutation-checked against four write shapes. The reconciler is unreachable from any request path — it reads every transfer regardless of owner. |
 | No concurrency protection — two simultaneous requests could both spend the same funds | Milestone 8 | Serialised by a row lock on the ledger account. Proven by holding one transaction open and asserting the second CANNOT decide until it commits, then sees the committed world — not by a parallel race, which can pass on timing luck against no lock at all. Ten concurrent requests against funds for five commit exactly five. |
 | A settled transfer could exist that the ledger had never recorded | Milestone 7 | The state change and the ledger posting share one transaction. Asserted by inducing a failure inside it and checking the transfer is still `submitted`, the event claim is gone, and the redelivery then applies cleanly. |
@@ -79,8 +83,9 @@ They are real, and this application should not be exposed to untrusted users.
 
 | Finding | Severity | Milestone |
 |---|---|---|
-| Nothing credits a customer's ledger account, so the solvency check is an exposure cap rather than a balance check | Medium | 10 |
-| `transactionsSync` called without a cursor; results overwritten each page | High | 10 |
+| Nothing credits a customer's ledger account, so the solvency check is an exposure cap rather than a balance check | Medium | unscheduled |
+| Plaid data is fetched during page render — correct pagination now, but no persistence, so SSR re-walks history | Medium | 11 |
+| Account linking keeps only the first account on a Plaid Item; the rest are discarded | Medium | 11 |
 | No rate limiting on authentication or money movement | Medium | unscheduled |
 | `shareableId` is base64 encoding presented as encryption | Medium | unscheduled |
 | Transaction status derived from a timestamp in the Appwrite-backed table | Medium | 11 |
@@ -110,6 +115,22 @@ the signature verification that makes the webhook path trustworthy — and
 silently correcting drift destroys the evidence of what caused it, which is the
 only thing that can tell an operator whether they are looking at a bug or a
 provider incident. The report says so in its own output.
+
+Milestone 10 fixed the sync ITSELF but did not move it off the render path.
+`getTransactions` now paginates correctly, accumulates, and terminates — the
+infinite loop and the data loss are gone — but it starts from no cursor on every
+call, so a page render still re-walks an item's history. The cursor-persisting
+sync runs from `npm run plaid:sync`, and an architecture test forbids any render
+path from reaching the cursor store: a page load that advances sync state would
+let two concurrent renders race the same item. Wiring the UI to read the synced
+store is the UI rebuild's job, and both remaining Plaid defects are listed above
+rather than implied.
+
+The solvency-check row moved to unscheduled. It was pointed at Milestone 10 on
+the assumption that Plaid balances would land with the sync rebuild; they did
+not — this milestone rebuilt transaction sync, not balance ingestion. Re-pointing
+it at a milestone that has now closed would be how the finding quietly
+disappears.
 
 `credit_limit_minor` is stated plainly rather than dressed up: it caps how much
 one customer may have committed and unsettled at once. It is NOT a bank-balance

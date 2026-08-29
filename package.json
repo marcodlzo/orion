@@ -19,7 +19,8 @@
     "db:backfill": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-backfill.ts",
     "db:backfill:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-backfill.ts --commit",
     "db:verify": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-verify.ts",
-    "db:reconcile": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-reconcile.ts"
+    "db:reconcile": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-reconcile.ts",
+    "plaid:sync": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/plaid-sync.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",

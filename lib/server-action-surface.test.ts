@@ -1117,6 +1117,14 @@ describe("migration tooling stays out of the request path", () => {
         // Reconciliation reads EVERY transfer regardless of who owns it —
         // correct for an operator sweep, catastrophic in a request.
         f.startsWith("lib/reconciliation/") ||
+        // Plaid sync ADVANCES A STORED CURSOR. Driving that from a page render
+        // is the defect Milestone 10 removed: a render would advance sync state
+        // as a side effect of someone loading a page, and two concurrent
+        // renders would race the same item's cursor. The pure engine and
+        // adapter are deliberately NOT here — they hold no state and the render
+        // path uses them to paginate correctly without persisting anything.
+        f === "lib/plaid-sync/sync.ts" ||
+        f === "lib/db/repositories/plaid-items.repository.ts" ||
         f === "lib/db/repositories/linked-accounts.repository.ts" ||
         f === "lib/db/test-database.ts" ||
         f === "lib/db/health.ts"
@@ -1245,6 +1253,70 @@ describe("migration tooling stays out of the request path", () => {
       .sort();
 
     expect(importers).toEqual(["scripts/db-reconcile.ts"]);
+  });
+
+  it("the render path paginates but never persists a cursor", () => {
+    // `getTransactions` is still called during SSR — that coupling belongs to
+    // the UI rebuild. What must NOT come back is the render path owning sync
+    // state: a page load that advances a cursor makes two concurrent renders
+    // race it, and makes a render's failure lose transactions permanently.
+    //
+    // It may use the pure engine (correct pagination, bounded, terminating).
+    // It may not reach anything that stores a cursor.
+    const banks = graph.get("lib/server/banks.ts");
+    expect(banks, "the render-path bank reader must exist").toBeTruthy();
+
+    const reachable = closure(["lib/server/banks.ts"]);
+
+    expect(reachable.has("lib/plaid-sync/engine.ts")).toBe(true);
+    expect(reachable.has("lib/plaid-sync/sync.ts")).toBe(false);
+    expect(reachable.has("lib/db/repositories/plaid-items.repository.ts")).toBe(
+      false
+    );
+  });
+
+  it("the sync loop cannot be written without a cursor again", () => {
+    // The original defect in one line: `transactionsSync({ access_token })` with
+    // no cursor, which returns the same first page forever. Every call site must
+    // either pass a cursor or be the deliberate first-page case that names it.
+    // Scoped to the CALL, not the file. The first version of this guard just
+    // asked whether the module mentioned "cursor" anywhere, which the enclosing
+    // `async (cursor) =>` satisfied — so it stayed green against a call reverted
+    // to `transactionsSync({ access_token })`. A guard a nearby identifier can
+    // satisfy is not a guard.
+    const CALL = /transactionsSync\s*\(/g;
+
+    let callSites = 0;
+    for (const mod of Array.from(graph.values())) {
+      let match: RegExpExecArray | null;
+      const rx = new RegExp(CALL.source, CALL.flags);
+
+      while ((match = rx.exec(mod.code)) !== null) {
+        callSites += 1;
+
+        // The argument expression: from the opening paren to its match.
+        let depth = 0;
+        let end = match.index + match[0].length - 1;
+        for (let i = end; i < mod.code.length; i += 1) {
+          if (mod.code[i] === "(") depth += 1;
+          else if (mod.code[i] === ")") {
+            depth -= 1;
+            if (depth === 0) {
+              end = i;
+              break;
+            }
+          }
+        }
+        const args = mod.code.slice(match.index, end + 1);
+
+        expect(
+          args,
+          `${mod.file}: transactionsSync must be called with a cursor`
+        ).toMatch(/\bcursor\b/);
+      }
+    }
+
+    expect(callSites, "no transactionsSync call sites found").toBeGreaterThan(0);
   });
 
   it("every migration module that performs I/O declares server-only", () => {

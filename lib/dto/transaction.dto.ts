@@ -1,3 +1,5 @@
+import type { SyncedTransaction } from "../plaid-sync/engine";
+
 /**
  * Read DTO for transaction history.
  *
@@ -49,7 +51,33 @@ const money = (value: unknown): number => {
   return 0;
 };
 
-/** Map a Plaid transaction to the display DTO. */
+/**
+ * Map an already-adapted Plaid transaction to the display DTO.
+ *
+ * Takes a SyncedTransaction, not a raw Plaid object: the provider's shape stops
+ * at `lib/plaid-sync/adapter.ts`, and the conversion from Plaid's float dollars
+ * to exact minor units happens there, once.
+ *
+ * `amount` is divided back to a decimal number ONLY here, at the display edge,
+ * because TransactionsTable renders through the float `formatAmount`. That is
+ * the last remaining float in this path and it belongs to the UI rebuild — the
+ * stored value and everything upstream of this line are integer minor units.
+ */
+export function toTransactionDTOFromSync(
+  transaction: SyncedTransaction
+): TransactionDTO {
+  return {
+    id: transaction.transactionId,
+    name: transaction.name,
+    date: transaction.postedDate,
+    amount: transaction.amountMinor / 100,
+    type: transaction.pending ? "pending" : "posted",
+    paymentChannel: transaction.pending ? "pending" : "posted",
+    category: transaction.merchantName ?? "",
+  };
+}
+
+/** Map a raw Plaid transaction to the display DTO. */
 export function toTransactionDTOFromPlaid(transaction: unknown): TransactionDTO {
   const t = (transaction ?? {}) as Record<string, unknown>;
   const category = Array.isArray(t.category) ? str(t.category[0]) : "";
