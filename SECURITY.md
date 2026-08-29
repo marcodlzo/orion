@@ -58,6 +58,10 @@ regressed. Nothing here is claimed on the strength of a code reading alone.
 | Database test suites could truncate the development database | `3af095b` | `TEST_DATABASE_URL` is required with no fallback to `DATABASE_URL`, refused when both resolve to the same database, and refused when the name does not end in `_test`. `lib/db/test-database.test.ts` |
 | No idempotency — a retry, a second tab or a replayed request sent two transfers | Phase 7 | A client-generated key is claimed durably **before** the provider is called, and travels with the request so Dwolla returns the original transfer rather than creating a second. Replay is asserted by re-issuing the request and checking one financial effect, never by observing that a key row exists. `transfers.db.test.ts`, `transfer.test.ts` |
 | The Dwolla transfer reference was discarded, making reconciliation impossible | Phase 7 | Recorded on the transfer row, unique, and never overwritten once set. A response with no reference raises rather than inventing a placeholder. |
+| No ledger; balances read live from the provider | Milestone 6 | Double-entry entries in PostgreSQL, signed integer minor units, sum-to-zero enforced by a deferred constraint trigger, UPDATE and DELETE rejected by triggers. There is no balance column: a balance is `SUM(amount_minor)`, so it cannot drift from the entries. `ledger.db.test.ts` |
+| Provider acceptance treated as settlement | Milestone 7 | `submitted` and `settled` are distinct states. `settled` is reachable from exactly one function, only from `submitted`, and only when driven by a signature-verified provider event — enforced in the SQL predicate, not by a caller remembering to check. `settlement.service.db.test.ts` |
+| No webhooks — the system could never learn what the ACH network did | Milestone 7 | `/api/webhooks/dwolla` verifies an HMAC over the **raw** body with `timingSafeEqual` before parsing, and **refuses every delivery when the secret is unset** rather than falling through to accepting them. Events are deduplicated by a unique index on the provider's event id, so a redelivery has no second financial effect — asserted by delivering the same event twice, and concurrently, and counting ledger entries. |
+| A settled transfer could exist that the ledger had never recorded | Milestone 7 | The state change and the ledger posting share one transaction. Asserted by inducing a failure inside it and checking the transfer is still `submitted`, the event claim is gone, and the redelivery then applies cleanly. |
 
 The DTO tests are allowlist-based and run against a serialized payload rather
 than checking fields one at a time — a per-field assertion would keep passing
@@ -70,12 +74,13 @@ They are real, and this application should not be exposed to untrusted users.
 
 | Finding | Severity | Milestone |
 |---|---|---|
-| No ledger; balances read live from the provider | High | 6 |
-| Provider acceptance treated as settlement | High | 7 |
+| No holds; an available balance is not distinguished from a ledger balance | High | 8 |
+| No concurrency protection on balance-affecting operations | High | 8 |
+| No reconciliation against the provider, and no reversals | High | 9 |
 | `transactionsSync` called without a cursor; results overwritten each page | High | 10 |
 | No rate limiting on authentication or money movement | Medium | unscheduled |
 | `shareableId` is base64 encoding presented as encryption | Medium | unscheduled |
-| Transaction status derived from a timestamp | Medium | 7 |
+| Transaction status derived from a timestamp in the Appwrite-backed table | Medium | 11 |
 | Provider credentials stored in plaintext Appwrite documents | High | unscheduled |
 
 Three rows now read **unscheduled**, and that is a correction rather than a
@@ -91,7 +96,16 @@ which is itself worth recording: it currently blocks the runtime cutover.
 
 `initiateTransfer` is now idempotent. PostgreSQL holds the claim, which makes it
 the first table a request path writes to — a boundary opened deliberately for
-this one route and pinned by an allowlist, not removed.
+this one route and pinned by an allowlist, not removed. Milestone 7 opened a
+second, for the same reason and under the same pin: settlement writes the
+transfer state and the ledger from a verified webhook. The allowlist is asserted
+by exact equality, so a third crossing fails the suite rather than joining it.
+
+The timestamp-derived status row moved from Milestone 7 to 11. Milestone 7 gave
+**transfers** a real, provider-driven state, and nothing derives that from a
+clock. `getTransactionStatus()` survives only in the Appwrite-backed transaction
+table, which the UI rebuild replaces; moving the row is a re-pointing, not a
+demotion, and it stays listed until that table is gone.
 
 ## The PostgreSQL migration
 

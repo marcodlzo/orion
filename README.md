@@ -93,9 +93,9 @@ enabled, which is how five type errors shipped.
 | 3 | Money primitives — integer minor units | done |
 | 4 | PostgreSQL introduction — schema, migrations, backfill, verifier | done |
 | 5 | Idempotency and durable transfer records | done |
-| 6 | Immutable double-entry ledger | next |
-| 7 | Transfer state machine and provider webhooks | |
-| 8 | Holds, available vs ledger balance, concurrency safety | |
+| 6 | Immutable double-entry ledger | done |
+| 7 | Transfer state machine and provider webhooks | done |
+| 8 | Holds, available vs ledger balance, concurrency safety | next |
 | 9 | Reconciliation, audit trail, reversals | |
 | 10 | Plaid sync rebuild — cursor persistence, full change handling | |
 | 11 | UI rebuild | |

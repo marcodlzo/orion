@@ -59,6 +59,12 @@ jobs:
       DWOLLA_KEY: ci-dwolla-key
       DWOLLA_SECRET: ci-dwolla-secret
       DWOLLA_ENV: sandbox
+      # Deliberately NOT set. The webhook tests supply their own secret to the
+      # function under test, so nothing here needs one — and leaving it unset
+      # means a handler that ever starts reading process.env directly, instead
+      # of taking the secret as an argument, fails in CI rather than passing
+      # against an accidental value.
+      # DWOLLA_WEBHOOK_SECRET
       # TEST_DATABASE_URL only. DATABASE_URL is deliberately NOT set at job
       # scope: the database suites truncate tables and refuse to run when both
       # variables resolve to the same server, which is what stops a developer

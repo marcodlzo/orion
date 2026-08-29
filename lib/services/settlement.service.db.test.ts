@@ -1,0 +1,406 @@
+import { createHmac } from "node:crypto";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import { closePool, query } from "../db/pool";
+import { requireTestDatabase } from "../db/test-database";
+import { upsertBankingCustomer } from "../db/repositories/banking-customers.repository";
+import {
+  claimTransfer,
+  markSubmitted,
+  type TransferRow,
+} from "../db/repositories/transfers.repository";
+import {
+  entriesForTransfer,
+  totalAcrossAllAccounts,
+} from "../db/repositories/ledger.repository";
+import { findWebhookEvent } from "../db/repositories/webhook-events.repository";
+import { handleDwollaWebhook } from "./settlement.service";
+
+/**
+ * SETTLEMENT, AGAINST A REAL SERVER.
+ *
+ * The properties here cannot be shown with a mocked database. "Applied exactly
+ * once" is a property of a unique index under concurrency; "the state change and
+ * the ledger posting are atomic" is a property of a transaction. A fake would
+ * assert that the test's own bookkeeping works.
+ *
+ * Every assertion is about OBSERVABLE FINANCIAL EFFECT — the transfer's state
+ * and the entries that exist — never about the handler having been reached.
+ */
+
+const SECRET = "webhook-test-secret";
+
+beforeAll(() => {
+  requireTestDatabase();
+});
+
+afterAll(async () => {
+  await closePool();
+});
+
+beforeEach(async () => {
+  await query(
+    `TRUNCATE ledger_entries, ledger_transactions, ledger_accounts,
+              provider_webhook_events, transfers, linked_accounts,
+              banking_customers CASCADE`
+  );
+});
+
+let keySeq = 0;
+const nextKey = () => {
+  keySeq += 1;
+  return `11111111-1111-4111-8111-${String(keySeq).padStart(12, "0")}`;
+};
+
+/** A transfer that has been accepted by the provider and is awaiting settlement. */
+async function submittedTransfer(
+  amountMinor = 250_00,
+  providerTransferId = "xfer-1"
+): Promise<TransferRow> {
+  const { row: customer } = await upsertBankingCustomer({
+    appwriteAuthId: `auth-${providerTransferId}`,
+    appwriteUserDocumentId: `doc-${providerTransferId}`,
+  });
+
+  const claimed = await claimTransfer({
+    customerId: customer.id,
+    idempotencyKey: nextKey(),
+    requestFingerprint: `fp-${providerTransferId}`,
+    amountMinor,
+    currency: "USD",
+  });
+
+  return markSubmitted({
+    transferId: claimed.row.id,
+    providerTransferId,
+  });
+}
+
+const body = (over: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    id: "evt-1",
+    topic: "customer_transfer_completed",
+    resourceId: "xfer-1",
+    ...over,
+  });
+
+/** Deliver a correctly signed event. */
+const deliver = (rawBody: string) =>
+  handleDwollaWebhook({
+    rawBody,
+    signatureHeader: createHmac("sha256", SECRET)
+      .update(rawBody, "utf8")
+      .digest("hex"),
+    secret: SECRET,
+  });
+
+const stateOf = async (id: string) => {
+  const { rows } = await query<{ state: string; settled_at: Date | null }>(
+    "SELECT state, settled_at FROM transfers WHERE id = $1",
+    [id]
+  );
+  return rows[0];
+};
+
+const ledgerTransactionCount = async () => {
+  const { rows } = await query<{ count: string }>(
+    "SELECT count(*)::text AS count FROM ledger_transactions",
+    []
+  );
+  return Number(rows[0].count);
+};
+
+describe("an unverified delivery", () => {
+  it("changes nothing and is not acknowledged", async () => {
+    const transfer = await submittedTransfer();
+
+    const result = await handleDwollaWebhook({
+      rawBody: body(),
+      signatureHeader: "0".repeat(64),
+      secret: SECRET,
+    });
+
+    expect(result).toEqual({ outcome: "rejected-signature", accepted: false });
+
+    // THE POINT OF THE TEST. Anyone can post to this endpoint claiming a
+    // transfer settled; nothing about the world may change because they did.
+    expect((await stateOf(transfer.id)).state).toBe("submitted");
+    expect(await findWebhookEvent("evt-1")).toBeNull();
+    expect(await ledgerTransactionCount()).toBe(0);
+  });
+
+  it("changes nothing when the secret is not configured", async () => {
+    const transfer = await submittedTransfer();
+    const raw = body();
+
+    const result = await handleDwollaWebhook({
+      rawBody: raw,
+      signatureHeader: createHmac("sha256", SECRET).update(raw).digest("hex"),
+      secret: undefined,
+    });
+
+    expect(result.accepted).toBe(false);
+    expect((await stateOf(transfer.id)).state).toBe("submitted");
+    expect(await ledgerTransactionCount()).toBe(0);
+  });
+});
+
+describe("settlement", () => {
+  it("moves the transfer to settled and posts a balanced pair", async () => {
+    const transfer = await submittedTransfer(250_00);
+
+    const result = await deliver(body());
+    expect(result).toEqual({ outcome: "settled", accepted: true });
+
+    const after = await stateOf(transfer.id);
+    expect(after.state).toBe("settled");
+    // A terminal state carries WHEN it became terminal, so nothing downstream
+    // has to derive a settlement time from a clock.
+    expect(after.settled_at).toBeInstanceOf(Date);
+
+    const entries = await entriesForTransfer(transfer.id);
+    expect(entries).toHaveLength(2);
+    expect(entries.map((e) => Number(e.amount_minor)).sort((a, b) => a - b)).toEqual([
+      -250_00, 250_00,
+    ]);
+
+    // CONSERVATION. Money moved between accounts; none was created.
+    expect(await totalAcrossAllAccounts()).toBe(0);
+  });
+
+  it("posts exactly one transaction per settled transfer", async () => {
+    const transfer = await submittedTransfer();
+    await deliver(body());
+
+    expect(await ledgerTransactionCount()).toBe(1);
+    expect(await entriesForTransfer(transfer.id)).toHaveLength(2);
+  });
+});
+
+describe("a redelivered event", () => {
+  it("is applied ONCE — the second delivery changes nothing", async () => {
+    // The scenario the whole deduplication mechanism exists for. Dwolla retries,
+    // and a retry is indistinguishable from a first delivery at the HTTP layer.
+    const transfer = await submittedTransfer(120_00);
+
+    const first = await deliver(body());
+    const settledAt = (await stateOf(transfer.id)).settled_at;
+
+    const second = await deliver(body());
+
+    expect(first.outcome).toBe("settled");
+    expect(second).toEqual({ outcome: "duplicate", accepted: true });
+
+    // ONE financial effect, not two. Asserted on the ledger, not on a flag:
+    // a deduplication table can be perfectly populated while the money moved
+    // twice.
+    expect(await ledgerTransactionCount()).toBe(1);
+    expect(await entriesForTransfer(transfer.id)).toHaveLength(2);
+    expect(await totalAcrossAllAccounts()).toBe(0);
+
+    const after = await stateOf(transfer.id);
+    expect(after.state).toBe("settled");
+    // Unchanged, not rewritten with a second settlement time.
+    expect(after.settled_at?.getTime()).toBe(settledAt?.getTime());
+  });
+
+  it("is applied once even when both deliveries arrive at the same moment", async () => {
+    // Two concurrent transactions inserting the same event id: the unique index
+    // decides, not the handler's control flow. Sequential redelivery would pass
+    // against an implementation that merely checks-then-inserts.
+    const transfer = await submittedTransfer(75_00);
+
+    const [a, b] = await Promise.all([deliver(body()), deliver(body())]);
+
+    const outcomes = [a.outcome, b.outcome].sort();
+    expect(outcomes).toEqual(["duplicate", "settled"]);
+
+    expect(await ledgerTransactionCount()).toBe(1);
+    expect(await entriesForTransfer(transfer.id)).toHaveLength(2);
+    expect(await totalAcrossAllAccounts()).toBe(0);
+  });
+
+  it("treats a DIFFERENT event for an already-terminal transfer as terminal, not a second settlement", async () => {
+    // Out-of-order or contradictory delivery: `failed` arriving after
+    // `completed`. The state machine is in the WHERE clause, so the second event
+    // finds nothing to update.
+    const transfer = await submittedTransfer(90_00);
+
+    await deliver(body({ id: "evt-a", topic: "customer_transfer_completed" }));
+    const late = await deliver(
+      body({ id: "evt-b", topic: "customer_transfer_failed" })
+    );
+
+    expect(late).toEqual({ outcome: "already-terminal", accepted: true });
+
+    const after = await stateOf(transfer.id);
+    expect(after.state).toBe("settled");
+    expect(await ledgerTransactionCount()).toBe(1);
+    expect(await totalAcrossAllAccounts()).toBe(0);
+
+    // Recorded as seen, with what it did — so a contradictory event is visible
+    // to reconciliation rather than silently dropped.
+    const event = await findWebhookEvent("evt-b");
+    expect(event?.outcome).toBe("already-terminal");
+    expect(event?.processed_at).toBeInstanceOf(Date);
+  });
+});
+
+describe("a provider failure", () => {
+  it("reaches an explicit failed state and posts nothing", async () => {
+    const transfer = await submittedTransfer();
+
+    const result = await deliver(body({ topic: "customer_transfer_failed" }));
+    expect(result).toEqual({ outcome: "failed", accepted: true });
+
+    const { rows } = await query<{ state: string; failure_code: string | null }>(
+      "SELECT state, failure_code FROM transfers WHERE id = $1",
+      [transfer.id]
+    );
+    expect(rows[0].state).toBe("failed");
+
+    // A fixed vocabulary, never a provider message: those quote the request,
+    // and a Dwolla request carries funding-source URLs.
+    expect(rows[0].failure_code).toBe("PROVIDER_FAILED");
+
+    // Nothing was ever posted for this transfer, so there is nothing to
+    // compensate. The ledger learns about a transfer only when it settles.
+    expect(await entriesForTransfer(transfer.id)).toHaveLength(0);
+    expect(await ledgerTransactionCount()).toBe(0);
+  });
+
+  it("records a return with its timestamp", async () => {
+    const transfer = await submittedTransfer();
+
+    const result = await deliver(body({ topic: "customer_transfer_returned" }));
+    expect(result.outcome).toBe("returned");
+
+    const { rows } = await query<{ state: string; returned_at: Date | null }>(
+      "SELECT state, returned_at FROM transfers WHERE id = $1",
+      [transfer.id]
+    );
+    expect(rows[0].state).toBe("returned");
+    expect(rows[0].returned_at).toBeInstanceOf(Date);
+    expect(await ledgerTransactionCount()).toBe(0);
+  });
+});
+
+describe("events this system cannot act on", () => {
+  it("records an unmapped topic and changes nothing", async () => {
+    const transfer = await submittedTransfer();
+
+    const result = await deliver(body({ id: "evt-x", topic: "customer_created" }));
+    expect(result).toEqual({ outcome: "ignored-topic", accepted: true });
+
+    expect((await stateOf(transfer.id)).state).toBe("submitted");
+    expect((await findWebhookEvent("evt-x"))?.outcome).toBe("ignored-topic");
+  });
+
+  it("records an event for a transfer it has never seen", async () => {
+    // Exactly the shape a reconciliation gap takes: the provider believes in a
+    // transfer this system has no record of. Accepted so it is not redelivered
+    // forever, but written down so it is findable.
+    const result = await deliver(body({ id: "evt-y", resourceId: "xfer-unknown" }));
+
+    expect(result).toEqual({ outcome: "unknown-transfer", accepted: true });
+    expect((await findWebhookEvent("evt-y"))?.outcome).toBe("unknown-transfer");
+    expect(await ledgerTransactionCount()).toBe(0);
+  });
+
+  it("will not settle a transfer that was never submitted", async () => {
+    // A transfer still in `requested` was never accepted by the provider, so no
+    // event can legitimately say it settled. `settled` must be unreachable from
+    // anywhere but `submitted`.
+    const { row: customer } = await upsertBankingCustomer({
+      appwriteAuthId: "auth-req",
+      appwriteUserDocumentId: "doc-req",
+    });
+    const claimed = await claimTransfer({
+      customerId: customer.id,
+      idempotencyKey: nextKey(),
+      requestFingerprint: "fp-req",
+      amountMinor: 10_00,
+      currency: "USD",
+    });
+
+    // Give it a provider reference WITHOUT advancing the state, which is the
+    // only way an event could find it at all.
+    await query("UPDATE transfers SET provider_transfer_id = $2 WHERE id = $1", [
+      claimed.row.id,
+      "xfer-req",
+    ]);
+
+    const result = await deliver(body({ id: "evt-z", resourceId: "xfer-req" }));
+
+    expect(result).toEqual({ outcome: "already-terminal", accepted: true });
+    expect((await stateOf(claimed.row.id)).state).toBe("requested");
+    expect(await ledgerTransactionCount()).toBe(0);
+  });
+
+  it("acknowledges an unparseable body without recording it", async () => {
+    const result = await deliver("this is not json");
+
+    expect(result).toEqual({ outcome: "malformed", accepted: true });
+    expect(await ledgerTransactionCount()).toBe(0);
+  });
+});
+
+describe("atomicity of the settlement effect", () => {
+  it("never records an event as processed without its effect", async () => {
+    // The failure this guards: marking the event processed in one transaction
+    // and applying it in another. A crash between them either loses the event
+    // or replays it. Both are asserted here by checking that the event row and
+    // the ledger agree.
+    const transfer = await submittedTransfer(310_00);
+    await deliver(body());
+
+    const event = await findWebhookEvent("evt-1");
+    expect(event?.processed_at).toBeInstanceOf(Date);
+    expect(event?.outcome).toBe("settled");
+
+    expect((await stateOf(transfer.id)).state).toBe("settled");
+    expect(await entriesForTransfer(transfer.id)).toHaveLength(2);
+  });
+
+  it("rolls the state change back when the posting fails", async () => {
+    // Drive a failure INSIDE the transaction, after the state change, and check
+    // the transfer is still `submitted` afterwards. If the two were in separate
+    // transactions this would leave a settled transfer with no entries — a
+    // transfer the system believes completed and the ledger has never heard of.
+    const transfer = await submittedTransfer(44_00);
+
+    // The balance trigger is DEFERRABLE INITIALLY DEFERRED, so an unbalanced
+    // posting fails at COMMIT — the hardest moment for the effect to be atomic.
+    await query(
+      `CREATE OR REPLACE FUNCTION orion_test_break_entries() RETURNS trigger
+       LANGUAGE plpgsql AS $$
+       BEGIN
+         RAISE EXCEPTION 'induced failure';
+       END $$`
+    );
+    await query(
+      `CREATE TRIGGER orion_test_break_entries
+         BEFORE INSERT ON ledger_entries
+         FOR EACH ROW EXECUTE FUNCTION orion_test_break_entries()`
+    );
+
+    try {
+      await expect(deliver(body())).rejects.toThrow();
+    } finally {
+      await query("DROP TRIGGER IF EXISTS orion_test_break_entries ON ledger_entries");
+      await query("DROP FUNCTION IF EXISTS orion_test_break_entries()");
+    }
+
+    // Everything the transaction did is gone: the state change, and the claim
+    // on the event id — so the redelivery that follows can be applied properly.
+    expect((await stateOf(transfer.id)).state).toBe("submitted");
+    expect(await findWebhookEvent("evt-1")).toBeNull();
+    expect(await ledgerTransactionCount()).toBe(0);
+
+    // And the redelivery does apply.
+    const retry = await deliver(body());
+    expect(retry.outcome).toBe("settled");
+    expect(await entriesForTransfer(transfer.id)).toHaveLength(2);
+    expect(await totalAcrossAllAccounts()).toBe(0);
+  });
+});

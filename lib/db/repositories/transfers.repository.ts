@@ -30,6 +30,8 @@ export type TransferRow = {
   provider: string;
   provider_transfer_id: string | null;
   failure_code: string | null;
+  settled_at: Date | null;
+  returned_at: Date | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -123,9 +125,8 @@ export async function claimTransfer(
 
   if (inserted.rows[0]) return { kind: "claimed", row: inserted.rows[0] };
 
-  // The key was already claimed. Lock the row before deciding anything about
-  // it: without FOR UPDATE two concurrent retries could both read `requested`
-  // and both re-drive the provider call.
+  // The key was already claimed. See the note above on what FOR UPDATE does
+  // and does not do here — the unique index is what serialised the race.
   const existing = await run<TransferRow>(
     client,
     `SELECT * FROM transfers
@@ -242,4 +243,45 @@ export async function listTransfersForCustomer(
     [customerId]
   );
   return rows;
+}
+
+/**
+ * Record a terminal outcome learned from the provider.
+ *
+ * ONLY from `submitted`. A transfer that was never submitted cannot have
+ * settled, and one already terminal must not be moved again — a redelivered
+ * webhook, or two events arriving out of order, would otherwise rewrite
+ * history. The state machine is enforced in the WHERE clause, so an illegal
+ * transition updates no row rather than being caught by an `if` somebody has to
+ * remember to write.
+ *
+ * `settled` is reachable ONLY here. Nothing on the request path may write it:
+ * acceptance is not settlement, and the only thing entitled to say a transfer
+ * settled is the provider that settled it.
+ */
+export async function markTerminal(
+  input: {
+    transferId: string;
+    outcome: "settled" | "failed" | "returned";
+    failureCode?: string | null;
+  },
+  client?: PoolClient
+): Promise<TransferRow | null> {
+  const { rows } = await run<TransferRow>(
+    client,
+    `UPDATE transfers
+        SET state        = $2,
+            settled_at   = CASE WHEN $2 = 'settled'  THEN now() ELSE settled_at  END,
+            returned_at  = CASE WHEN $2 = 'returned' THEN now() ELSE returned_at END,
+            failure_code = CASE WHEN $2 IN ('failed', 'returned')
+                                THEN COALESCE($3, failure_code, 'PROVIDER_REPORTED')
+                                ELSE failure_code END
+      WHERE id = $1 AND state = 'submitted'
+      RETURNING *`,
+    [input.transferId, input.outcome, input.failureCode ?? null]
+  );
+
+  // NULL rather than a throw: a webhook for a transfer already terminal is an
+  // ordinary redelivery, not an error, and the caller decides what to record.
+  return rows[0] ?? null;
 }

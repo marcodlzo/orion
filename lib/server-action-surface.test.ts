@@ -1027,9 +1027,19 @@ describe("migration tooling stays out of the request path", () => {
    * them; reaching the pool through a repository is the intended shape.
    * `migration/` is NOT here and never will be — those reads are unscoped.
    */
+  // EXACT EQUALITY, NOT A SUBSET. Every entry here was a deliberate milestone
+  // decision to let a request path reach PostgreSQL. Growing this list is how a
+  // cutover happens by accident, so a new arrival must fail the test and be
+  // argued for, not absorbed.
+  //
+  // The second group arrived with the webhook receiver: settlement is the point
+  // at which the provider tells us what actually happened, and it writes the
+  // ledger in the same transaction as the state change.
   const RUNTIME_DB_ALLOWLIST = [
     "lib/db/repositories/transfers.repository.ts",
     "lib/db/repositories/banking-customers.repository.ts",
+    "lib/db/repositories/webhook-events.repository.ts",
+    "lib/db/repositories/ledger.repository.ts",
     "lib/db/pool.ts",
     "lib/db/errors.ts",
   ];
@@ -1070,17 +1080,78 @@ describe("migration tooling stays out of the request path", () => {
     expect(forbidden.filter((f) => reachable.has(f))).toEqual([]);
   });
 
-  it("the crossing is the transfer service, not a component or an action body", () => {
+  it("the crossing is a service, not a component, a route body or an action body", () => {
     // Where the boundary is crossed matters as much as that it is. A client
     // component importing a repository directly would put a database call one
-    // refactor away from the browser bundle.
-    const importers = Array.from(graph.values())
-      .filter((m) =>
-        m.imports.includes("lib/db/repositories/transfers.repository.ts")
-      )
-      .map((m) => m.file);
+    // refactor away from the browser bundle; a route handler doing its own
+    // database work would put the decisions somewhere no test can reach without
+    // standing up a server.
+    const DB_REPOSITORIES = [
+      "lib/db/repositories/transfers.repository.ts",
+      "lib/db/repositories/webhook-events.repository.ts",
+      "lib/db/repositories/ledger.repository.ts",
+    ];
 
-    expect(importers).toEqual(["lib/services/transfers.service.ts"]);
+    const importers = Array.from(
+      new Set(
+        Array.from(graph.values())
+          .filter((m) => m.imports.some((i) => DB_REPOSITORIES.includes(i)))
+          .map((m) => m.file)
+      )
+    ).sort();
+
+    expect(importers).toEqual([
+      "lib/services/settlement.service.ts",
+      "lib/services/transfers.service.ts",
+    ]);
+  });
+
+  it("the webhook route delegates and does not decide", () => {
+    // A webhook handler is the easiest place in an application for logic to
+    // accumulate out of reach of the tests: it needs an HTTP request to call, so
+    // whatever lives in it tends to go unasserted. Keeping the route free of
+    // database and provider imports is what keeps the decisions in a service
+    // that a unit test can call directly.
+    const route = graph.get("app/api/webhooks/dwolla/route.ts");
+    expect(route, "the webhook route must exist").toBeTruthy();
+
+    const forbidden = route!.imports.filter(
+      (i) =>
+        i.startsWith("lib/db/") ||
+        i.startsWith("lib/repositories/") ||
+        i === "lib/server/dwolla.ts"
+    );
+    expect(forbidden).toEqual([]);
+  });
+
+  it("only the transfers repository writes a transfer state", () => {
+    // `settled` means money moved. If any module besides the one repository can
+    // assign a transfer state, the system can declare a settlement on its own
+    // say-so, which is the entire failure this milestone exists to prevent.
+    //
+    // Matches SQL assignment (`state = 'settled'`), not the words themselves:
+    // the service and the tests name these states constantly.
+    const ASSIGNS_STATE = /\bstate\s*=\s*'(requested|submitted|settled|failed|returned)'/;
+
+    const writers = Array.from(graph.values())
+      .filter((m) => !m.file.endsWith(".test.ts") && ASSIGNS_STATE.test(m.code))
+      .map((m) => m.file)
+      .sort();
+
+    // Non-vacuous by construction: that repository does assign states, so an
+    // expression that matched nothing would fail here rather than pass quietly.
+    expect(writers).toEqual(["lib/db/repositories/transfers.repository.ts"]);
+  });
+
+  it("a transfer can only become terminal from submitted", () => {
+    const code = graph.get("lib/db/repositories/transfers.repository.ts")!.code;
+    const markTerminal = code.slice(code.indexOf("export async function markTerminal"));
+    expect(markTerminal).toContain("export async function markTerminal");
+
+    // The state machine is in the WHERE clause, not in an `if` somebody has to
+    // remember to write. Without this predicate a redelivered webhook, or two
+    // events arriving out of order, rewrites a terminal transfer.
+    expect(markTerminal).toMatch(/WHERE\s+id = \$1\s+AND\s+state = 'submitted'/);
   });
 
   it("every migration module that performs I/O declares server-only", () => {
