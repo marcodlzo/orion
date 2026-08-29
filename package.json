@@ -20,7 +20,9 @@
     "db:backfill:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-backfill.ts --commit",
     "db:verify": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-verify.ts",
     "db:reconcile": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-reconcile.ts",
-    "plaid:sync": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/plaid-sync.ts"
+    "plaid:sync": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/plaid-sync.ts",
+    "credentials:encrypt": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/encrypt-credentials.ts",
+    "credentials:encrypt:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/encrypt-credentials.ts --commit"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",

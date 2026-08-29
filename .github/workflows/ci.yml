@@ -59,6 +59,11 @@ jobs:
       DWOLLA_KEY: ci-dwolla-key
       DWOLLA_SECRET: ci-dwolla-secret
       DWOLLA_ENV: sandbox
+      # A throwaway key for the build. The crypto tests generate their own and
+      # never read this; it exists so a production build, which requires the
+      # variable, can complete. It protects nothing and guards nothing real.
+      CREDENTIAL_ENCRYPTION_KEYS: ci:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      CREDENTIAL_ENCRYPTION_ACTIVE_KEY_ID: ci
       # Deliberately NOT set. The webhook tests supply their own secret to the
       # function under test, so nothing here needs one — and leaving it unset
       # means a handler that ever starts reading process.env directly, instead

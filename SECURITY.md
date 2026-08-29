@@ -64,6 +64,7 @@ regressed. Nothing here is claimed on the strength of a code reading alone.
 | No holds; an available balance was not distinguished from a ledger balance | Milestone 8 | A hold is placed in the same transaction as the idempotency claim and committed BEFORE the provider is called; captured on settlement, released on failure or return, always in the same transaction as the terminal state. Available balance is derived on every read — no stored balance and no stored available balance exist, and a test fails if either is added. `holds.db.test.ts` |
 | A return arriving after settlement was silently discarded, leaving the ledger counting money that had come back | Milestone 9 | `settled -> reversed` is a real transition, and it posts COMPENSATING entries in the same transaction. The originals are never touched — the entry triggers make an edit impossible — and the compensating amounts are derived from the original rows rather than supplied by a caller. A posting is reversed at most once, enforced by a unique constraint, and a reversal cannot itself be reversed. `reversals.db.test.ts` |
 | No audit trail of financial state changes | Milestone 9 | An AFTER UPDATE trigger on `transfers` logs every state change, so the trail cannot be bypassed by a new code path or by a hand-written UPDATE — asserted by changing state in psql and checking the row appears. Append-only. It carries no actor identifier and no provider payload; a test asserts the exact column list. |
+| Provider credentials stored in plaintext in Appwrite documents | credential encryption | AES-256-GCM at the storage boundary, keys from the environment, each ciphertext BOUND to the record and field it belongs to — so one copied into another user's record fails to decrypt rather than being used. A missing key refuses every read and write; there is no disabled mode. `npm run credentials:encrypt` converts existing values, verifying each round-trips before writing and refusing to rewrite ciphertext it cannot read. `envelope.test.ts`, `credential-encryption.test.ts` |
 | Transaction status was derived from a clock — a failed transfer displayed as "Success" after 48 hours | Milestone 11 | `getTransactionStatus()` is deleted. Status is carried on the DTO and comes from the provider's `pending` flag or the transfer state machine. Its characterisation tests were removed rather than relaxed, which is the documented lifecycle. `dto.test.ts` |
 | Money was a float through the entire display path, so a rendered column did not sum to the stored total | Milestone 11 | `formatAmount(amount: number)` is deleted. Balances and transaction amounts are exact integer minor units to the point of display, and `formatMinorUnits` REFUSES a float rather than rounding it. `money.test.ts` |
 | Plaid was called during SSR, so a page render drove provider sync | Milestone 11 | History reads the synced store. An architecture test asserts no render path reaches any sync module, and that the request-reachable read module contains no write — the half that advances a cursor stays operator-only. |
@@ -91,18 +92,24 @@ They are real, and this application should not be exposed to untrusted users.
 | No end-to-end tests; the server-owned transfer flow is not driven end to end | Medium | unscheduled |
 | No rate limiting on authentication or money movement | Medium | unscheduled |
 | `shareableId` is base64 encoding presented as encryption | Medium | unscheduled |
-| Provider credentials stored in plaintext Appwrite documents | High | unscheduled |
 
 Three rows now read **unscheduled**, and that is a correction rather than a
 demotion: rate limiting and `shareableId` were tagged to Milestone 2, which
 closed without them. A finding pointing at a completed milestone is how work
 quietly disappears, so they are named as unowned until something claims them.
 
-The credentials row is not new, but it is now stated plainly rather than implied: access
-tokens, processor tokens and funding-source URLs live unencrypted in the
-document store. This is why the PostgreSQL migration does **not** copy them —
-and why it cannot be completed until this is fixed. It has no milestone yet,
-which is itself worth recording: it currently blocks the runtime cutover.
+The credentials row has moved to Fixed. Access tokens and funding-source URLs
+are encrypted at rest, which removes what was blocking the PostgreSQL cutover —
+the migration deliberately did not copy them while they were plaintext.
+
+TWO HONEST LIMITS. Reads still ACCEPT a plaintext value, because records written
+before the migration hold one; that tolerance is removed once
+`credentials:encrypt` reports clean, and it is not a fallback for a decryption
+failure — an encrypted value that fails to decrypt raises. And the key lives in
+an environment variable, so anyone who can read the environment can decrypt: this
+is encryption at rest against a stolen backup, a console session or a leaked
+admin key, not against a compromised host. A KMS is the next step up and is not
+in place.
 
 `initiateTransfer` is now idempotent. PostgreSQL holds the claim, which makes it
 the first table a request path writes to — a boundary opened deliberately for

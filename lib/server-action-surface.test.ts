@@ -474,6 +474,11 @@ const ADMIN_CLIENT_ALLOWED = [
   // Adding an entry here WITHOUT that containment would be an unauthenticated
   // read of the whole dataset.
   "lib/migration/appwrite-source.ts",
+  // OPERATOR TOOLING, same containment as above and for the same reason: it
+  // rewrites the credential fields of every bank document during the one-off
+  // encryption migration. It is on this list only because the containment suite
+  // proves no request path can reach it.
+  "lib/migration/credential-encryption.ts",
 ];
 
 describe("admin client boundary", () => {
@@ -1338,6 +1343,110 @@ describe("migration tooling stays out of the request path", () => {
     }
 
     expect(callSites, "no transactionsSync call sites found").toBeGreaterThan(0);
+  });
+
+  /**
+   * What a client component actually BUNDLES.
+   *
+   * A `'use server'` module is an RPC boundary: Next replaces the import with a
+   * reference and the action's own imports never reach the browser. So the
+   * bundle closure stops AT an action rather than traversing through it.
+   *
+   * Getting this wrong in either direction is bad. Treating the boundary as
+   * transparent forbids a repository from doing any server-side work at all —
+   * every repository is reachable through some action, including the ones
+   * holding the Appwrite admin key, and that has always been correct. Ignoring
+   * the boundary entirely would miss a client component importing a server
+   * module DIRECTLY, which is the case that genuinely bundles.
+   *
+   * Capability containment — what an action can reach — is a different question
+   * and is asserted separately, by the action-closure tests above.
+   */
+  const clientBundleClosure = (): Set<string> => {
+    const seen = new Set<string>();
+    const queue = Array.from(graph.values())
+      .filter((m) => m.isClient)
+      .map((m) => m.file);
+
+    while (queue.length) {
+      const cur = queue.pop()!;
+      if (seen.has(cur)) continue;
+      seen.add(cur);
+
+      const mod = graph.get(cur);
+
+      // An action IS reachable — it is in `seen` above, as the stub the bundler
+      // emits — but its own imports are not bundled, so the walk stops here.
+      if (mod?.isAction) continue;
+
+      for (const dep of mod?.imports ?? []) {
+        if (!seen.has(dep)) queue.push(dep);
+      }
+    }
+    return seen;
+  };
+
+  it("no key material can reach the browser bundle", () => {
+    // THE WORST PLACE A KEY COULD END UP. A client component importing the
+    // keyring — even unused — puts key material in the bundle and, more
+    // durably, in the source map, which tree-shaking does not touch. That would
+    // make every encrypted credential readable by anyone who opened devtools.
+    const bundled = clientBundleClosure();
+
+    expect(bundled.has("lib/crypto/keyring.ts")).toBe(false);
+    expect(bundled.has("lib/crypto/envelope.ts")).toBe(false);
+  });
+
+  it("the bundle closure stops at an action but not before it", () => {
+    // The closure above is only meaningful if it genuinely walks past a client
+    // component into its non-action imports, and genuinely stops at an action.
+    // Without this, a closure that returned almost nothing would pass every
+    // bundle test in this file.
+    const bundled = clientBundleClosure();
+
+    // It reaches a plain module a client imports directly.
+    expect(bundled.has("lib/utils.ts")).toBe(true);
+    // It does not walk THROUGH an action into that action's server-side
+    // dependencies.
+    expect(bundled.has("lib/appwrite.ts")).toBe(false);
+  });
+
+  it("the crypto modules declare server-only", () => {
+    for (const file of ["lib/crypto/keyring.ts", "lib/crypto/envelope.ts"]) {
+      const mod = graph.get(file);
+      expect(mod, `${file} must exist`).toBeTruthy();
+      expect(mod!.code, `${file} must import server-only`).toMatch(
+        /import\s+["']server-only["']/
+      );
+    }
+  });
+
+  it("only the storage boundary and its migration handle ciphertext", () => {
+    // Encryption belongs at the point of storage. Spreading encrypt/decrypt
+    // through services would mean every caller deciding what to bind a ciphertext
+    // to, and a caller that got the binding wrong would silently disable the
+    // protection against a moved ciphertext.
+    const importers = Array.from(graph.values())
+      .filter((m) => m.imports.includes("lib/crypto/envelope.ts"))
+      .map((m) => m.file)
+      .sort();
+
+    expect(importers).toEqual([
+      "lib/migration/credential-encryption.ts",
+      "lib/repositories/banks.repository.ts",
+    ]);
+  });
+
+  it("no credential-encryption key is read outside the keyring", () => {
+    // One place reads the key material from the environment. A second reader is
+    // how a module ends up with a key it does not need and cannot be audited
+    // for.
+    const readers = Array.from(graph.values())
+      .filter((m) => m.code.includes("CREDENTIAL_ENCRYPTION_KEYS"))
+      .map((m) => m.file)
+      .sort();
+
+    expect(readers).toEqual(["lib/crypto/keyring.ts"]);
   });
 
   it("every migration module that performs I/O declares server-only", () => {

@@ -6,6 +6,11 @@ import { ID, Query } from "node-appwrite";
 import type { Actor } from "../auth/actor";
 import { createAdminClient } from "../appwrite";
 import { InfrastructureError } from "../auth/errors";
+import {
+  decryptCredential,
+  encryptCredential,
+  isEncrypted,
+} from "../crypto/envelope";
 
 const {
   APPWRITE_DATABASE_ID: DATABASE_ID,
@@ -13,11 +18,17 @@ const {
 } = process.env;
 
 /**
- * A bank-collection document as stored.
+ * A bank-collection document, AS THE APPLICATION SEES IT.
  *
- * Carries `accessToken` and `fundingSourceUrl`. Both are provider credentials.
- * Keeping them out of anything that crosses to the browser is the DTO phase;
- * this phase only controls who may reach the record at all.
+ * `accessToken` and `fundingSourceUrl` are plaintext HERE AND ONLY HERE — in
+ * memory, after this module decrypted them. At rest they are AES-256-GCM
+ * ciphertext bound to the record they belong to.
+ *
+ * The type is unchanged on purpose. Every caller already treats these two fields
+ * as credentials that must not cross to the browser, and making them a different
+ * type would have meant touching every one of those call sites to gain nothing:
+ * the protection is that the plaintext no longer exists at rest, not that it is
+ * spelled differently in memory.
  */
 export type BankRecord = {
   $id: string;
@@ -53,6 +64,38 @@ export type BankRecord = {
 const ownedBy = (actor: Actor) => Query.equal("userId", [actor.userId]);
 
 /**
+ * Decrypt the two credential fields on a stored document.
+ *
+ * TOLERATES PLAINTEXT, DELIBERATELY AND TEMPORARILY. Records written before the
+ * encryption backfill still hold plaintext, and refusing to read them would take
+ * every existing user's account down at deploy time rather than at migration
+ * time. `scripts/encrypt-credentials.ts` converts them, and
+ * `npm run credentials:verify` reports how many remain — the number that must
+ * reach zero before this tolerance is removed.
+ *
+ * It is NOT a fallback for a decryption failure. A value that IS encrypted and
+ * fails to decrypt raises, because that means a wrong key, a tampered store, or
+ * a ciphertext moved between records — and quietly returning it would hand the
+ * caller ciphertext to use as a token.
+ */
+function decryptBankRecord(document: unknown): BankRecord {
+  const record = document as BankRecord;
+
+  const read = (field: "accessToken" | "fundingSourceUrl"): string => {
+    const stored = record[field];
+    if (typeof stored !== "string" || stored === "") return "";
+    if (!isEncrypted(stored)) return stored;
+    return decryptCredential(stored, { recordId: record.$id, field });
+  };
+
+  return {
+    ...record,
+    accessToken: read("accessToken"),
+    fundingSourceUrl: read("fundingSourceUrl"),
+  };
+}
+
+/**
  * OWNED — every bank belonging to the authenticated actor.
  *
  * Takes no user identifier. There is deliberately no way to ask for somebody
@@ -64,7 +107,7 @@ export async function getOwnedBanks(actor: Actor): Promise<BankRecord[]> {
     const result = await database.listDocuments(DATABASE_ID!, BANK_COLLECTION_ID!, [
       ownedBy(actor),
     ]);
-    return result.documents as unknown as BankRecord[];
+    return result.documents.map(decryptBankRecord);
   } catch (error) {
     throw new InfrastructureError("Failed to read the bank collection", { cause: error });
   }
@@ -92,7 +135,7 @@ export async function getOwnedBankByDocumentId(
       Query.equal("$id", [documentId]),
       ownedBy(actor),
     ]);
-    return (result.documents[0] as unknown as BankRecord | undefined) ?? null;
+    return result.documents[0] ? decryptBankRecord(result.documents[0]) : null;
   } catch (error) {
     throw new InfrastructureError("Failed to read the bank collection", { cause: error });
   }
@@ -117,7 +160,7 @@ export async function getOwnedBankByAccountId(
       Query.equal("accountId", [accountId]),
       ownedBy(actor),
     ]);
-    return (result.documents[0] as unknown as BankRecord | undefined) ?? null;
+    return result.documents[0] ? decryptBankRecord(result.documents[0]) : null;
   } catch (error) {
     throw new InfrastructureError("Failed to read the bank collection", { cause: error });
   }
@@ -154,7 +197,7 @@ export async function findCounterpartyBankByAccountId(
     // Preserved from the original implementation: an ambiguous match resolves
     // to nothing rather than picking one arbitrarily.
     if (result.total !== 1) return null;
-    return (result.documents[0] as unknown as BankRecord | undefined) ?? null;
+    return result.documents[0] ? decryptBankRecord(result.documents[0]) : null;
   } catch (error) {
     throw new InfrastructureError("Failed to read the bank collection", { cause: error });
   }
@@ -176,15 +219,39 @@ export async function createBankForActor(
     shareableId: string;
   }
 ): Promise<BankRecord> {
+  // THE ID IS GENERATED HERE, BEFORE THE WRITE, because the ciphertext is bound
+  // to it. Letting the store assign one would mean encrypting against an id that
+  // does not exist yet, and binding to nothing is the same as not binding.
+  const documentId = ID.unique();
+
   try {
     const { database } = await createAdminClient();
     const created = await database.createDocument(
       DATABASE_ID!,
       BANK_COLLECTION_ID!,
-      ID.unique(),
-      { userId: actor.userId, ...input }
+      documentId,
+      {
+        userId: actor.userId,
+        ...input,
+        // ENCRYPTED AT REST. Possession of a funding-source URL is sufficient to
+        // move money and an access token grants read access to the account, so
+        // neither may sit in plaintext in a document store — where a backup, a
+        // console session or a leaked admin key exposes every one of them at
+        // once.
+        accessToken: encryptCredential(input.accessToken, {
+          recordId: documentId,
+          field: "accessToken",
+        }),
+        fundingSourceUrl: encryptCredential(input.fundingSourceUrl, {
+          recordId: documentId,
+          field: "fundingSourceUrl",
+        }),
+      }
     );
-    return created as unknown as BankRecord;
+
+    // Returned decrypted, so the caller sees what it passed in rather than
+    // having to know this happened.
+    return { ...(created as unknown as BankRecord), ...input };
   } catch (error) {
     throw new InfrastructureError("Failed to create the bank record", { cause: error });
   }
