@@ -62,6 +62,9 @@ regressed. Nothing here is claimed on the strength of a code reading alone.
 | Provider acceptance treated as settlement | Milestone 7 | `submitted` and `settled` are distinct states. `settled` is reachable from exactly one function, only from `submitted`, and only when driven by a signature-verified provider event — enforced in the SQL predicate, not by a caller remembering to check. `settlement.service.db.test.ts` |
 | No webhooks — the system could never learn what the ACH network did | Milestone 7 | `/api/webhooks/dwolla` verifies an HMAC over the **raw** body with `timingSafeEqual` before parsing, and **refuses every delivery when the secret is unset** rather than falling through to accepting them. Events are deduplicated by a unique index on the provider's event id, so a redelivery has no second financial effect — asserted by delivering the same event twice, and concurrently, and counting ledger entries. |
 | No holds; an available balance was not distinguished from a ledger balance | Milestone 8 | A hold is placed in the same transaction as the idempotency claim and committed BEFORE the provider is called; captured on settlement, released on failure or return, always in the same transaction as the terminal state. Available balance is derived on every read — no stored balance and no stored available balance exist, and a test fails if either is added. `holds.db.test.ts` |
+| A return arriving after settlement was silently discarded, leaving the ledger counting money that had come back | Milestone 9 | `settled -> reversed` is a real transition, and it posts COMPENSATING entries in the same transaction. The originals are never touched — the entry triggers make an edit impossible — and the compensating amounts are derived from the original rows rather than supplied by a caller. A posting is reversed at most once, enforced by a unique constraint, and a reversal cannot itself be reversed. `reversals.db.test.ts` |
+| No audit trail of financial state changes | Milestone 9 | An AFTER UPDATE trigger on `transfers` logs every state change, so the trail cannot be bypassed by a new code path or by a hand-written UPDATE — asserted by changing state in psql and checking the row appears. Append-only. It carries no actor identifier and no provider payload; a test asserts the exact column list. |
+| No reconciliation — drift between the provider and the ledger was undetectable | Milestone 9 | `npm run db:reconcile` compares the ledger against itself and, optionally, against Dwolla. It REPORTS AND NEVER REPAIRS: an architecture test scans every module under `lib/reconciliation/` for a write of any form, and that guard is itself mutation-checked against four write shapes. The reconciler is unreachable from any request path — it reads every transfer regardless of owner. |
 | No concurrency protection — two simultaneous requests could both spend the same funds | Milestone 8 | Serialised by a row lock on the ledger account. Proven by holding one transaction open and asserting the second CANNOT decide until it commits, then sees the committed world — not by a parallel race, which can pass on timing luck against no lock at all. Ten concurrent requests against funds for five commit exactly five. |
 | A settled transfer could exist that the ledger had never recorded | Milestone 7 | The state change and the ledger posting share one transaction. Asserted by inducing a failure inside it and checking the transfer is still `submitted`, the event claim is gone, and the redelivery then applies cleanly. |
 
@@ -76,7 +79,6 @@ They are real, and this application should not be exposed to untrusted users.
 
 | Finding | Severity | Milestone |
 |---|---|---|
-| No reconciliation against the provider, and no reversals | High | 9 |
 | Nothing credits a customer's ledger account, so the solvency check is an exposure cap rather than a balance check | Medium | 10 |
 | `transactionsSync` called without a cursor; results overwritten each page | High | 10 |
 | No rate limiting on authentication or money movement | Medium | unscheduled |
@@ -101,6 +103,13 @@ this one route and pinned by an allowlist, not removed. Milestone 7 opened a
 second, for the same reason and under the same pin: settlement writes the
 transfer state and the ledger from a verified webhook. The allowlist is asserted
 by exact equality, so a third crossing fails the suite rather than joining it.
+
+Reconciliation deliberately does not act on what it finds. Applying the
+provider's view would make it a second place settlement can happen, bypassing
+the signature verification that makes the webhook path trustworthy — and
+silently correcting drift destroys the evidence of what caused it, which is the
+only thing that can tell an operator whether they are looking at a bug or a
+provider incident. The report says so in its own output.
 
 `credit_limit_minor` is stated plainly rather than dressed up: it caps how much
 one customer may have committed and unsettled at once. It is NOT a bank-balance

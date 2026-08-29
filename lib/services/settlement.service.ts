@@ -8,12 +8,15 @@ import {
 } from "../db/repositories/webhook-events.repository";
 import {
   findTransferByProviderId,
+  markReversed,
   markTerminal,
 } from "../db/repositories/transfers.repository";
 import {
   ensureCustomerAccount,
   ensureSettlementAccount,
+  findSettlementPosting,
   postTransaction,
+  reverseTransaction,
 } from "../db/repositories/ledger.repository";
 import { captureHold, releaseHold } from "../db/repositories/holds.repository";
 import {
@@ -38,7 +41,8 @@ export type SettlementOutcome =
   | "already-terminal"
   | "settled"
   | "failed"
-  | "returned";
+  | "returned"
+  | "reversed";
 
 export type SettlementResult = {
   outcome: SettlementOutcome;
@@ -153,6 +157,25 @@ export async function handleDwollaWebhook(
     );
 
     if (!updated) {
+      // NOT NECESSARILY OUT OF ORDER. An ACH return arrives days after
+      // settlement, so `settled` + a return event is the ordinary shape of a
+      // transfer being taken back — not a stale event to discard. Treating it
+      // as already-terminal is how a returned transfer silently keeps money it
+      // no longer has.
+      if (outcome === "returned" || outcome === "failed") {
+        const reversal = await reverseSettledTransfer(
+          { transferId: transfer.id, outcome },
+          client
+        );
+        if (reversal) {
+          await markEventProcessed(
+            { eventId: claim.row.id, outcome: "reversed" },
+            client
+          );
+          return { outcome: "reversed", accepted: true };
+        }
+      }
+
       await markEventProcessed(
         { eventId: claim.row.id, outcome: "already-terminal" },
         client
@@ -205,4 +228,55 @@ export async function handleDwollaWebhook(
 
     return { outcome, accepted: true };
   });
+}
+
+/**
+ * Take back a transfer that had already settled.
+ *
+ * COMPENSATION, NOT CORRECTION. The original entries stay exactly as they are —
+ * they record something that genuinely happened — and a new opposing posting
+ * records the money coming back. The ledger's own triggers make this the only
+ * possibility: entries cannot be updated or deleted.
+ *
+ * The state change and the compensating posting are in the CALLER'S
+ * transaction, so a transfer marked `reversed` whose money was never returned
+ * cannot exist.
+ *
+ * Returns null when there is nothing to reverse — the transfer was not settled,
+ * or its posting has already been compensated — so a redelivery is a no-op.
+ */
+async function reverseSettledTransfer(
+  input: { transferId: string; outcome: "returned" | "failed" },
+  client: TransactionClient
+): Promise<boolean> {
+  const posting = await findSettlementPosting(input.transferId, client);
+  if (!posting) return false;
+
+  const reversal = await reverseTransaction(
+    {
+      transactionId: posting.id,
+      description: `transfer ${input.transferId} reversed`,
+    },
+    client
+  );
+  if (!reversal) return false;
+
+  const updated = await markReversed(
+    {
+      transferId: input.transferId,
+      failureCode: `PROVIDER_${input.outcome.toUpperCase()}`,
+    },
+    client
+  );
+
+  // The posting was compensated but the transfer was not `settled`. Nothing
+  // sensible follows from that, and committing half of it would leave opposing
+  // entries with no state change to explain them.
+  if (!updated) {
+    throw new Error(
+      `transfer ${input.transferId} had a settlement posting but was not settled`
+    );
+  }
+
+  return true;
 }

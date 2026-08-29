@@ -11,8 +11,11 @@ import {
 } from "../db/repositories/transfers.repository";
 import {
   entriesForTransfer,
+  findReversalOf,
+  findSettlementPosting,
   totalAcrossAllAccounts,
 } from "../db/repositories/ledger.repository";
+import { transitionsForTransfer } from "../db/repositories/transfers.repository";
 import { findWebhookEvent } from "../db/repositories/webhook-events.repository";
 import {
   availableBalanceOf,
@@ -46,7 +49,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await query(
-    `TRUNCATE ledger_holds, ledger_entries, ledger_transactions, ledger_accounts,
+    `TRUNCATE transfer_state_transitions, ledger_holds, ledger_entries,
+              ledger_transactions, ledger_accounts,
               provider_webhook_events, transfers, linked_accounts,
               banking_customers CASCADE`
   );
@@ -250,10 +254,11 @@ describe("a redelivered event", () => {
     expect(await totalAcrossAllAccounts()).toBe(0);
   });
 
-  it("treats a DIFFERENT event for an already-terminal transfer as terminal, not a second settlement", async () => {
-    // Out-of-order or contradictory delivery: `failed` arriving after
-    // `completed`. The state machine is in the WHERE clause, so the second event
-    // finds nothing to update.
+  it("COMPENSATES a failure reported after settlement rather than ignoring it", async () => {
+    // This used to assert the event was discarded as already-terminal. That was
+    // the gap Milestone 9 closes: a provider reporting failure or return AFTER
+    // settlement is the normal shape of ACH, and ignoring it leaves the ledger
+    // insisting money moved that has since come back.
     const transfer = await submittedTransfer(90_00);
 
     await deliver(body({ id: "evt-a", topic: "customer_transfer_completed" }));
@@ -261,18 +266,46 @@ describe("a redelivered event", () => {
       body({ id: "evt-b", topic: "customer_transfer_failed" })
     );
 
-    expect(late).toEqual({ outcome: "already-terminal", accepted: true });
+    expect(late).toEqual({ outcome: "reversed", accepted: true });
 
-    const after = await stateOf(transfer.id);
-    expect(after.state).toBe("settled");
-    expect(await ledgerTransactionCount()).toBe(1);
+    const { rows } = await query<{ state: string }>(
+      "SELECT state FROM transfers WHERE id = $1",
+      [transfer.id]
+    );
+    expect(rows[0].state).toBe("reversed");
+
+    // Compensated, not corrected: the settlement posting stands and a second,
+    // opposing one exists beside it.
+    expect(await entriesForTransfer(transfer.id)).toHaveLength(4);
     expect(await totalAcrossAllAccounts()).toBe(0);
 
-    // Recorded as seen, with what it did — so a contradictory event is visible
-    // to reconciliation rather than silently dropped.
     const event = await findWebhookEvent("evt-b");
-    expect(event?.outcome).toBe("already-terminal");
+    expect(event?.outcome).toBe("reversed");
     expect(event?.processed_at).toBeInstanceOf(Date);
+  });
+
+  it("IS already-terminal when there is genuinely nothing left to do", async () => {
+    // A settlement claimed for a transfer that already failed. There is no
+    // posting to compensate and no legal transition, so the event is recorded
+    // and changes nothing.
+    const transfer = await submittedTransfer(90_00);
+
+    await deliver(body({ id: "evt-fail", topic: "customer_transfer_failed" }));
+    const late = await deliver(
+      body({ id: "evt-late-settle", topic: "customer_transfer_completed" })
+    );
+
+    expect(late).toEqual({ outcome: "already-terminal", accepted: true });
+
+    const { rows } = await query<{ state: string }>(
+      "SELECT state FROM transfers WHERE id = $1",
+      [transfer.id]
+    );
+    expect(rows[0].state).toBe("failed");
+    expect(await ledgerTransactionCount()).toBe(0);
+
+    const event = await findWebhookEvent("evt-late-settle");
+    expect(event?.outcome).toBe("already-terminal");
   });
 });
 
@@ -429,6 +462,123 @@ describe("holds are resolved with the transfer", () => {
     expect(second?.state).toBe("captured");
     // Unchanged, not re-stamped with a second resolution time.
     expect(second?.resolved_at?.getTime()).toBe(first?.resolved_at?.getTime());
+  });
+});
+
+describe("a return that arrives AFTER settlement", () => {
+  // The ordinary shape of an ACH return: the transfer completed days ago and
+  // the money is now being taken back. Treating this as a stale out-of-order
+  // event is how a returned transfer silently keeps money it no longer has.
+
+  it("reverses the transfer instead of ignoring the event", async () => {
+    const transfer = await submittedTransfer(140_00);
+    await deliver(body({ id: "evt-settle" }));
+
+    const result = await deliver(
+      body({ id: "evt-return", topic: "customer_transfer_returned" })
+    );
+
+    expect(result).toEqual({ outcome: "reversed", accepted: true });
+
+    const { rows } = await query<{ state: string; reversed_at: Date | null }>(
+      "SELECT state, reversed_at FROM transfers WHERE id = $1",
+      [transfer.id]
+    );
+    expect(rows[0].state).toBe("reversed");
+    expect(rows[0].reversed_at).toBeInstanceOf(Date);
+  });
+
+  it("posts COMPENSATING entries and leaves the settlement posting intact", async () => {
+    const transfer = await submittedTransfer(140_00);
+    await deliver(body({ id: "evt-settle" }));
+
+    const settlementPosting = await findSettlementPosting(transfer.id);
+    const settledEntries = await entriesForTransfer(transfer.id);
+    expect(settledEntries).toHaveLength(2);
+
+    await deliver(body({ id: "evt-return", topic: "customer_transfer_returned" }));
+
+    // Four entries: two that happened, two that undid them. The originals are
+    // the same rows — they record something that genuinely occurred.
+    const after = await entriesForTransfer(transfer.id);
+    expect(after).toHaveLength(4);
+    expect(after.filter((e) => settledEntries.some((o) => o.id === e.id))).toHaveLength(2);
+
+    const reversal = await findReversalOf(settlementPosting!.id);
+    expect(reversal?.kind).toBe("reversal");
+
+    // Net zero across the transfer, and conservation across the ledger.
+    expect(after.reduce((sum, e) => sum + Number(e.amount_minor), 0)).toBe(0);
+    expect(await totalAcrossAllAccounts()).toBe(0);
+  });
+
+  it("reverses ONCE however many times the return is redelivered", async () => {
+    const transfer = await submittedTransfer(140_00);
+    await deliver(body({ id: "evt-settle" }));
+
+    const first = await deliver(
+      body({ id: "evt-return", topic: "customer_transfer_returned" })
+    );
+    const replay = await deliver(
+      body({ id: "evt-return", topic: "customer_transfer_returned" })
+    );
+    // A DIFFERENT event making the same claim — deduplication by event id does
+    // not help here, so the reversal itself has to be idempotent.
+    const another = await deliver(
+      body({ id: "evt-return-2", topic: "customer_transfer_returned" })
+    );
+
+    expect(first.outcome).toBe("reversed");
+    expect(replay.outcome).toBe("duplicate");
+    expect(another.outcome).toBe("already-terminal");
+
+    expect(await entriesForTransfer(transfer.id)).toHaveLength(4);
+    expect(await totalAcrossAllAccounts()).toBe(0);
+  });
+
+  it("records the whole lifecycle in the audit trail", async () => {
+    const transfer = await submittedTransfer(140_00);
+    await deliver(body({ id: "evt-settle" }));
+    await deliver(body({ id: "evt-return", topic: "customer_transfer_returned" }));
+
+    const trail = await transitionsForTransfer(transfer.id);
+
+    expect(trail.map((r) => r.to_state)).toEqual([
+      "requested",
+      "submitted",
+      "settled",
+      "reversed",
+    ]);
+    expect(trail[trail.length - 1].cause).toBe("provider-event");
+  });
+
+  it("leaves the captured hold captured", async () => {
+    // The hold was consumed when the money moved. A reversal returns the money
+    // through the ledger; it does not un-capture a reservation, which would
+    // credit the customer a second time.
+    const transfer = await submittedTransfer(140_00);
+    await deliver(body({ id: "evt-settle" }));
+    await deliver(body({ id: "evt-return", topic: "customer_transfer_returned" }));
+
+    const hold = await withTransaction((c) => findHoldByTransfer(transfer.id, c));
+    expect(hold?.state).toBe("captured");
+
+    // Availability is back to the full limit — restored by the compensating
+    // entries, not by releasing the hold.
+    const accountId = await accountFor(transfer.customer_id);
+    expect(await withTransaction((c) => availableBalanceOf(accountId, c))).toBe(280_00);
+  });
+
+  it("does not reverse a transfer that only reached submitted", async () => {
+    const transfer = await submittedTransfer(140_00);
+
+    const result = await deliver(
+      body({ id: "evt-return", topic: "customer_transfer_returned" })
+    );
+
+    // The ordinary terminal path, not a reversal: nothing was ever posted.
+    expect(result.outcome).toBe("returned");
+    expect(await entriesForTransfer(transfer.id)).toHaveLength(0);
   });
 });
 

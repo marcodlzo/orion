@@ -17,7 +17,24 @@ export type TransferState =
   | "submitted"
   | "settled"
   | "failed"
-  | "returned";
+  | "returned"
+  | "reversed";
+
+/**
+ * Why a transfer changed state.
+ *
+ * The audit trigger records every transition whether or not anyone says why —
+ * the database cannot know the reason, only that it happened. This is how a
+ * caller supplies the reason it does know. Saying nothing yields 'unrecorded',
+ * which is a visible gap rather than a missing row.
+ */
+export type TransitionCause =
+  | "claim"
+  | "provider-accepted"
+  | "provider-event"
+  | "insufficient-funds"
+  | "provider-rejected"
+  | "operator";
 
 export type TransferRow = {
   id: string;
@@ -32,6 +49,7 @@ export type TransferRow = {
   failure_code: string | null;
   settled_at: Date | null;
   returned_at: Date | null;
+  reversed_at: Date | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -74,6 +92,24 @@ async function run<T extends Record<string, unknown>>(
 }
 
 /**
+ * Declare, for this transaction only, why the next state change happens.
+ *
+ * TRANSACTION-LOCAL (`set_config(..., true)`), so it cannot leak onto the next
+ * caller to borrow this pooled connection. Without a transaction there is
+ * nothing to scope it to and the transition is recorded as 'unrecorded' — the
+ * change is still logged, because the trigger does not depend on this.
+ */
+async function declareCause(
+  client: PoolClient | undefined,
+  cause: TransitionCause
+): Promise<void> {
+  if (!client) return;
+  await run(client, "SELECT set_config('orion.transition_cause', $1, true)", [
+    cause,
+  ]);
+}
+
+/**
  * Claim an idempotency key, or discover it is already claimed.
  *
  * MUST BE COMMITTED BEFORE THE PROVIDER IS CALLED. That ordering is the whole
@@ -105,6 +141,7 @@ export async function claimTransfer(
   input: TransferClaim,
   client?: PoolClient
 ): Promise<ClaimOutcome> {
+  await declareCause(client, "claim");
   const inserted = await run<TransferRow>(
     client,
     `INSERT INTO transfers (
@@ -173,6 +210,7 @@ export async function markSubmitted(
   input: { transferId: string; providerTransferId: string },
   client?: PoolClient
 ): Promise<TransferRow> {
+  await declareCause(client, "provider-accepted");
   const { rows } = await run<TransferRow>(
     client,
     `UPDATE transfers
@@ -200,9 +238,10 @@ export async function markSubmitted(
  * those quote the request, and a Dwolla request carries funding-source URLs.
  */
 export async function markFailed(
-  input: { transferId: string; failureCode: string },
+  input: { transferId: string; failureCode: string; cause?: TransitionCause },
   client?: PoolClient
 ): Promise<TransferRow> {
+  await declareCause(client, input.cause ?? "provider-rejected");
   const { rows } = await run<TransferRow>(
     client,
     `UPDATE transfers
@@ -267,6 +306,7 @@ export async function markTerminal(
   },
   client?: PoolClient
 ): Promise<TransferRow | null> {
+  await declareCause(client, "provider-event");
   const { rows } = await run<TransferRow>(
     client,
     `UPDATE transfers
@@ -284,4 +324,62 @@ export async function markTerminal(
   // NULL rather than a throw: a webhook for a transfer already terminal is an
   // ordinary redelivery, not an error, and the caller decides what to record.
   return rows[0] ?? null;
+}
+
+/**
+ * A settled transfer is taken back.
+ *
+ * ONLY from `settled`, and it is a DIFFERENT transition from the terminal ones
+ * above. ACH returns arrive days after settlement, so `settled -> reversed` is
+ * not an out-of-order event to be ignored — it is the normal shape of a return,
+ * and treating it as "already terminal" is how a returned transfer silently
+ * keeps money it no longer has.
+ *
+ * The ledger is NOT touched here. Reversal posts compensating entries, which the
+ * caller does in this same transaction; splitting them would allow a reversed
+ * transfer whose money was never given back.
+ */
+export async function markReversed(
+  input: { transferId: string; failureCode?: string | null },
+  client?: PoolClient
+): Promise<TransferRow | null> {
+  await declareCause(client, "provider-event");
+  const { rows } = await run<TransferRow>(
+    client,
+    `UPDATE transfers
+        SET state        = 'reversed',
+            reversed_at  = now(),
+            failure_code = COALESCE($2, failure_code, 'PROVIDER_RETURNED')
+      WHERE id = $1 AND state = 'settled'
+      RETURNING *`,
+    [input.transferId, input.failureCode ?? null]
+  );
+
+  // NULL rather than a throw: a redelivered return for a transfer already
+  // reversed is an ordinary no-op.
+  return rows[0] ?? null;
+}
+
+export type TransferStateTransitionRow = {
+  id: string;
+  transfer_id: string;
+  from_state: TransferState | null;
+  to_state: TransferState;
+  cause: TransitionCause | "unrecorded";
+  occurred_at: Date;
+};
+
+/** The audit trail for one transfer, oldest first. */
+export async function transitionsForTransfer(
+  transferId: string,
+  client?: PoolClient
+): Promise<TransferStateTransitionRow[]> {
+  const { rows } = await run<TransferStateTransitionRow>(
+    client,
+    `SELECT * FROM transfer_state_transitions
+      WHERE transfer_id = $1
+      ORDER BY occurred_at, id`,
+    [transferId]
+  );
+  return rows;
 }

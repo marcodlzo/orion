@@ -96,8 +96,8 @@ enabled, which is how five type errors shipped.
 | 6 | Immutable double-entry ledger | done |
 | 7 | Transfer state machine and provider webhooks | done |
 | 8 | Holds, available vs ledger balance, concurrency safety | done |
-| 9 | Reconciliation, audit trail, reversals | next |
-| 10 | Plaid sync rebuild — cursor persistence, full change handling | |
+| 9 | Reconciliation, audit trail, reversals | done |
+| 10 | Plaid sync rebuild — cursor persistence, full change handling | next |
 | 11 | UI rebuild | |
 
 **Milestone 2** shrank the server-action surface from 24 exports to 7, moved

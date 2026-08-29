@@ -23,6 +23,17 @@ export type LedgerAccountRow = {
   updated_at: Date;
 };
 
+export type LedgerTransactionKind = "settlement" | "reversal";
+
+export type LedgerTransactionRow = {
+  id: string;
+  transfer_id: string | null;
+  kind: LedgerTransactionKind;
+  reverses_transaction_id: string | null;
+  description: string;
+  created_at: Date;
+};
+
 export type LedgerEntryRow = {
   id: string;
   transaction_id: string;
@@ -112,24 +123,35 @@ export async function ensureCustomerAccount(
  * to zero, or that has fewer than two lines, cannot be committed at all. The
  * caller cannot get half a posting in even by trying.
  *
- * `transferId` is UNIQUE on the transactions table, which is what makes posting
- * idempotent at the last possible layer: a retry that reaches here despite the
- * claim above it still cannot double-post.
+ * A transfer SETTLES at most once — a partial unique index on
+ * `kind = 'settlement'` — which is what makes posting idempotent at the last
+ * possible layer: a retry that reaches here despite the claim above it still
+ * cannot double-post. A reversal posts against the same transfer and is itself
+ * unique per original.
  */
 export async function postTransaction(
   input: {
     description: string;
     transferId?: string | null;
     lines: readonly PostingLine[];
+    /** Defaults to a settlement. A reversal must name what it reverses. */
+    kind?: LedgerTransactionKind;
+    reversesTransactionId?: string | null;
   },
   client: PoolClient
 ): Promise<{ transactionId: string; entries: LedgerEntryRow[] }> {
   const { rows: txnRows } = await run<{ id: string }>(
     client,
-    `INSERT INTO ledger_transactions (transfer_id, description)
-     VALUES ($1, $2)
+    `INSERT INTO ledger_transactions
+       (transfer_id, description, kind, reverses_transaction_id)
+     VALUES ($1, $2, $3, $4)
      RETURNING id`,
-    [input.transferId ?? null, input.description]
+    [
+      input.transferId ?? null,
+      input.description,
+      input.kind ?? "settlement",
+      input.reversesTransactionId ?? null,
+    ]
   );
   const transactionId = txnRows[0].id;
 
@@ -146,6 +168,87 @@ export async function postTransaction(
   }
 
   return { transactionId, entries };
+}
+
+/** The settlement posting for a transfer, if it has one. */
+export async function findSettlementPosting(
+  transferId: string,
+  client?: PoolClient
+): Promise<LedgerTransactionRow | null> {
+  const { rows } = await run<LedgerTransactionRow>(
+    client,
+    `SELECT * FROM ledger_transactions
+      WHERE transfer_id = $1 AND kind = 'settlement'`,
+    [transferId]
+  );
+  return rows[0] ?? null;
+}
+
+/** The reversal of a posting, if it has been reversed. */
+export async function findReversalOf(
+  transactionId: string,
+  client?: PoolClient
+): Promise<LedgerTransactionRow | null> {
+  const { rows } = await run<LedgerTransactionRow>(
+    client,
+    "SELECT * FROM ledger_transactions WHERE reverses_transaction_id = $1",
+    [transactionId]
+  );
+  return rows[0] ?? null;
+}
+
+/**
+ * Undo a posting by COMPENSATING it.
+ *
+ * NEW OPPOSING ENTRIES. The originals are not touched, and could not be: the
+ * entry triggers reject UPDATE and DELETE, so this is the only mechanism the
+ * schema permits. That is the point — a ledger you can edit is a ledger that
+ * cannot tell you what happened.
+ *
+ * THE AMOUNTS ARE DERIVED FROM THE ORIGINAL ENTRIES, never supplied by the
+ * caller. A reversal that computes its own figures can disagree with what it
+ * claims to be undoing; one built by negating the rows it points at cannot.
+ *
+ * Returns null when the posting has already been reversed, so a redelivered
+ * return is an ordinary no-op rather than an error. The unique constraint on
+ * `reverses_transaction_id` is the real guarantee — this check just lets the
+ * caller's transaction survive.
+ */
+export async function reverseTransaction(
+  input: { transactionId: string; description: string },
+  client: PoolClient
+): Promise<{ transactionId: string; entries: LedgerEntryRow[] } | null> {
+  const { rows: originals } = await run<LedgerTransactionRow>(
+    client,
+    "SELECT * FROM ledger_transactions WHERE id = $1",
+    [input.transactionId]
+  );
+  const original = originals[0];
+  if (!original) {
+    throw new Error(`ledger transaction ${input.transactionId} does not exist`);
+  }
+
+  const alreadyReversed = await findReversalOf(input.transactionId, client);
+  if (alreadyReversed) return null;
+
+  const entries = await entriesForTransaction(input.transactionId, client);
+  if (entries.length === 0) {
+    throw new Error(`ledger transaction ${input.transactionId} has no entries`);
+  }
+
+  return postTransaction(
+    {
+      description: input.description,
+      transferId: original.transfer_id,
+      kind: "reversal",
+      reversesTransactionId: original.id,
+      lines: entries.map((entry) => ({
+        accountId: entry.account_id,
+        amountMinor: -readMoneyMinor(entry.amount_minor),
+      })),
+    },
+    client
+  );
 }
 
 /**

@@ -1114,6 +1114,9 @@ describe("migration tooling stays out of the request path", () => {
     const forbidden = Array.from(graph.keys()).filter(
       (f) =>
         f.startsWith("lib/migration/") ||
+        // Reconciliation reads EVERY transfer regardless of who owns it —
+        // correct for an operator sweep, catastrophic in a request.
+        f.startsWith("lib/reconciliation/") ||
         f === "lib/db/repositories/linked-accounts.repository.ts" ||
         f === "lib/db/test-database.ts" ||
         f === "lib/db/health.ts"
@@ -1196,6 +1199,52 @@ describe("migration tooling stays out of the request path", () => {
     // remember to write. Without this predicate a redelivered webhook, or two
     // events arriving out of order, rewrites a terminal transfer.
     expect(markTerminal).toMatch(/WHERE\s+id = \$1\s+AND\s+state = 'submitted'/);
+  });
+
+  it("reconciliation issues no write, in any module", () => {
+    // THE ENTIRE VALUE OF A RECONCILER IS THAT IT OBSERVES. One that repairs
+    // drift destroys the evidence of what caused it, and the cause is the thing
+    // that matters — a ledger disagreeing with a provider means something
+    // upstream is wrong, and quietly editing rows until the numbers agree is
+    // how a bug becomes permanent.
+    //
+    // Asserted against the source rather than trusted to a docstring: "it never
+    // writes" is exactly the kind of promise that survives in a comment long
+    // after it stopped being true.
+    const files = Array.from(graph.keys()).filter((f) =>
+      f.startsWith("lib/reconciliation/")
+    );
+    expect(files.length).toBeGreaterThan(0);
+
+    // No trailing \b: the first version ended the alternation with one after
+    // `update\s+\w`, which can never match — a word character is never followed
+    // by a word boundary mid-word. It reported clean against a reconciler that
+    // had been given a real UPDATE, which is the precise failure this file
+    // exists to prevent, so the regex is now mutation-checked like any other
+    // guard.
+    const WRITE =
+      /\b(insert\s+into|update\s+"?\w|delete\s+from|truncate\b|drop\s+table|alter\s+table|set_config)/i;
+
+    for (const file of files) {
+      // Comments are stripped first: they describe what this must never do, and
+      // the prose would otherwise fail the test on its own explanation.
+      expect(WRITE.test(graph.get(file)!.code), `${file} must issue no write`).toBe(
+        false
+      );
+    }
+  });
+
+  it("the reconciler declares server-only and is reached only from scripts", () => {
+    const reconcile = graph.get("lib/reconciliation/reconcile.ts");
+    expect(reconcile, "the reconciler must exist").toBeTruthy();
+    expect(reconcile!.code).toMatch(/import\s+["']server-only["']/);
+
+    const importers = Array.from(graph.values())
+      .filter((m) => m.imports.includes("lib/reconciliation/reconcile.ts"))
+      .map((m) => m.file)
+      .sort();
+
+    expect(importers).toEqual(["scripts/db-reconcile.ts"]);
   });
 
   it("every migration module that performs I/O declares server-only", () => {

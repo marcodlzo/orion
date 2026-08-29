@@ -328,6 +328,7 @@ export async function executeTransfer(
         {
           transferId: claim.row.id,
           failureCode: "INSUFFICIENT_AVAILABLE_FUNDS",
+          cause: "insufficient-funds",
         },
         client
       );
@@ -379,7 +380,11 @@ export async function executeTransfer(
     // customer can commit, for money that never moved.
     await withTransaction(async (client) => {
       await markFailed(
-        { transferId: claim.row.id, failureCode: "PROVIDER_REJECTED" },
+        {
+          transferId: claim.row.id,
+          failureCode: "PROVIDER_REJECTED",
+          cause: "provider-rejected",
+        },
         client
       );
       await releaseHold(claim.row.id, client);
@@ -399,10 +404,19 @@ export async function executeTransfer(
 
   // The reference this code used to discard. Recorded before anything else, so
   // the transfer is reconcilable even if the steps below fail.
-  await markSubmitted({
-    transferId: claim.row.id,
-    providerTransferId: providerResult.transferId,
-  });
+  // In a transaction so the audit trail records WHY this transition happened.
+  // The cause is transaction-local; outside one there is nothing to scope it to
+  // and the trail would say 'unrecorded' for the most important transition a
+  // transfer makes.
+  await withTransaction((client) =>
+    markSubmitted(
+      {
+        transferId: claim.row.id,
+        providerTransferId: providerResult.transferId as string,
+      },
+      client
+    )
+  );
 
   // 6. Identities are server-derived. The caller supplies neither side.
   let record;

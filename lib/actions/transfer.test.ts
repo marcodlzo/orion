@@ -546,10 +546,13 @@ describe("K. idempotency", () => {
   it("records the provider reference that used to be discarded", async () => {
     await initiateTransfer(VALID_INTENT);
 
-    expect(markSubmitted).toHaveBeenCalledWith({
-      transferId: "pg-transfer-1",
-      providerTransferId: "transfer-1",
-    });
+    expect(markSubmitted).toHaveBeenCalledWith(
+      { transferId: "pg-transfer-1", providerTransferId: "transfer-1" },
+      // In a transaction, so the audit trail can record the cause. Outside one
+      // there is nothing to scope the cause to and the most important
+      // transition a transfer makes would be logged as 'unrecorded'.
+      expect.anything()
+    );
   });
 
   it("an in-flight claim re-drives the provider with the same key", async () => {
@@ -611,7 +614,12 @@ describe("K. idempotency", () => {
     // argument is the transaction client: the failure and the release of the
     // hold happen together, so asserting it is present is part of the point.
     expect(markFailed).toHaveBeenCalledWith(
-      { transferId: "pg-transfer-1", failureCode: "PROVIDER_REJECTED" },
+      {
+        transferId: "pg-transfer-1",
+        failureCode: "PROVIDER_REJECTED",
+        // The audit trail records WHY, not just that the state changed.
+        cause: "provider-rejected",
+      },
       expect.anything()
     );
   });
@@ -661,6 +669,7 @@ describe("K. idempotency", () => {
       {
         transferId: "pg-transfer-1",
         failureCode: "INSUFFICIENT_AVAILABLE_FUNDS",
+        cause: "insufficient-funds",
       },
       expect.anything()
     );
