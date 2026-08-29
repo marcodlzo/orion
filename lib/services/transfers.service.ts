@@ -35,6 +35,9 @@ import {
   markFailed,
   markSubmitted,
 } from "../db/repositories/transfers.repository";
+import { withTransaction } from "../db/pool";
+import { ensureCustomerAccount } from "../db/repositories/ledger.repository";
+import { placeHold, releaseHold } from "../db/repositories/holds.repository";
 import type { TransferResultDTO } from "../dto/transfer.dto";
 
 /**
@@ -120,6 +123,27 @@ export class InvalidTransferIntentError extends Error {
     this.name = "InvalidTransferIntentError";
     this.issues = issues;
     Object.setPrototypeOf(this, InvalidTransferIntentError.prototype);
+  }
+}
+
+/**
+ * Raised when the actor has already committed more than their account allows.
+ *
+ * Carries magnitudes, not account identifiers or balances belonging to anyone
+ * else. The caller learns that their own request did not fit; nothing about the
+ * shape of the ledger leaks through it.
+ */
+export class InsufficientAvailableFundsError extends Error {
+  readonly code = "INSUFFICIENT_AVAILABLE_FUNDS";
+  readonly availableMinor: number;
+  readonly requestedMinor: number;
+
+  constructor(options: { availableMinor: number; requestedMinor: number }) {
+    super("This transfer exceeds the funds available on the account");
+    this.name = "InsufficientAvailableFundsError";
+    this.availableMinor = options.availableMinor;
+    this.requestedMinor = options.requestedMinor;
+    Object.setPrototypeOf(this, InsufficientAvailableFundsError.prototype);
   }
 }
 
@@ -253,28 +277,83 @@ export async function executeTransfer(
   //    call, or in the same transaction as it, would leave exactly the gap the
   //    key exists to close.
   const customer = await requireBankingCustomer(actor);
-  const claim = await claimTransfer({
-    customerId: customer.id,
-    idempotencyKey: intent.idempotencyKey,
-    requestFingerprint: fingerprintIntent({
-      senderBankId: sourceBank.$id,
-      recipientAccountId,
-      amountMinor: intent.amount.amountMinor,
-      currency: intent.amount.currency,
-    }),
-    amountMinor: intent.amount.amountMinor,
-    currency: intent.amount.currency,
+
+  //    THE CLAIM AND THE HOLD ARE ONE TRANSACTION. Reserving the funds in a
+  //    separate transaction from the claim would leave a window in which a
+  //    transfer is claimed but its money is not spoken for, and a concurrent
+  //    request arriving in that window would see funds that are already
+  //    committed. Both commit together, before the provider is called.
+  const commitment = await withTransaction(async (client) => {
+    const claim = await claimTransfer(
+      {
+        customerId: customer.id,
+        idempotencyKey: intent.idempotencyKey,
+        requestFingerprint: fingerprintIntent({
+          senderBankId: sourceBank.$id,
+          recipientAccountId,
+          amountMinor: intent.amount.amountMinor,
+          currency: intent.amount.currency,
+        }),
+        amountMinor: intent.amount.amountMinor,
+        currency: intent.amount.currency,
+      },
+      client
+    );
+
+    // A resolved attempt is answered from the record. No provider call, no
+    // second transaction row, and NO SECOND HOLD — one financial effect,
+    // however many times this is called.
+    if (claim.kind === "replayed") {
+      return { kind: "replayed" as const, claim };
+    }
+
+    // Reserve the money. A re-drive of an in-flight claim finds the hold it
+    // already placed rather than reserving twice.
+    const account = await ensureCustomerAccount(customer.id, client);
+    const hold = await placeHold(
+      {
+        accountId: account.id,
+        transferId: claim.row.id,
+        amountMinor: intent.amount.amountMinor,
+      },
+      client
+    );
+
+    if (hold.kind === "insufficient") {
+      // AN EXPLICIT TERMINAL STATE, COMMITTED WITH THE CLAIM. Not an abandoned
+      // `requested` row and not a bare throw: a replay of this key must answer
+      // "failed" rather than trying again, and the key must stay claimed so a
+      // retry cannot slip past the same check.
+      await markFailed(
+        {
+          transferId: claim.row.id,
+          failureCode: "INSUFFICIENT_AVAILABLE_FUNDS",
+        },
+        client
+      );
+      return { kind: "insufficient" as const, hold };
+    }
+
+    return { kind: "proceed" as const, claim };
   });
 
-  // A resolved attempt is answered from the record. No provider call, no second
-  // transaction row — one financial effect, however many times this is called.
-  if (claim.kind === "replayed") {
+  if (commitment.kind === "replayed") {
     return {
-      transactionId: claim.row.id,
-      status: claim.row.state === "failed" ? "failed" : "submitted",
+      transactionId: commitment.claim.row.id,
+      status: commitment.claim.row.state === "failed" ? "failed" : "submitted",
       replayed: true,
     };
   }
+
+  if (commitment.kind === "insufficient") {
+    // NOTHING REACHED THE PROVIDER. No entries, no hold, no money in motion.
+    throw new InsufficientAvailableFundsError({
+      availableMinor: commitment.hold.availableMinor,
+      requestedMinor: commitment.hold.requestedMinor,
+    });
+  }
+
+  const claim = commitment.claim;
 
   // 5. Provider credentials are read and used here and never escape this
   //    function. They are not in the input, the output, any DTO, or any log.
@@ -295,9 +374,15 @@ export async function executeTransfer(
     // An explicit terminal state, not a silently abandoned `requested` row.
     // The code is fixed vocabulary: a provider error echoes the request, and
     // the request carries funding-source URLs.
-    await markFailed({
-      transferId: claim.row.id,
-      failureCode: "PROVIDER_REJECTED",
+    // The failure and the release of the hold are ONE transaction. A failed
+    // transfer whose hold stayed active would permanently reduce what this
+    // customer can commit, for money that never moved.
+    await withTransaction(async (client) => {
+      await markFailed(
+        { transferId: claim.row.id, failureCode: "PROVIDER_REJECTED" },
+        client
+      );
+      await releaseHold(claim.row.id, client);
     }).catch(() => undefined);
     throw error;
   }

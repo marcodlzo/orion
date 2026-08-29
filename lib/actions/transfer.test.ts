@@ -5,6 +5,7 @@ import { IdentityConflictError } from "../db/errors";
 import { UnauthorizedError } from "../auth/errors";
 import {
   InvalidTransferIntentError,
+  InsufficientAvailableFundsError,
   TransferSubmittedButNotRecordedError,
 } from "../services/transfers.service";
 import { TRANSFER_RESULT_DTO_FIELDS } from "../dto/transfer.dto";
@@ -35,6 +36,10 @@ const {
   claimTransfer,
   markSubmitted,
   markFailed,
+  ensureCustomerAccount,
+  placeHold,
+  releaseHold,
+  callOrder,
 } = vi.hoisted(() => ({
   cookieGet: vi.fn(),
   accountGet: vi.fn(),
@@ -47,6 +52,11 @@ const {
   claimTransfer: vi.fn(),
   markSubmitted: vi.fn(),
   markFailed: vi.fn(),
+  ensureCustomerAccount: vi.fn(),
+  placeHold: vi.fn(),
+  releaseHold: vi.fn(),
+  /** Records the order money-affecting steps ran in. */
+  callOrder: [] as string[],
 }));
 
 vi.mock("next/headers", () => ({
@@ -106,6 +116,35 @@ vi.mock("../db/repositories/transfers.repository", () => ({
   markFailed,
   findTransferByProviderId: vi.fn(),
   listTransfersForCustomer: vi.fn(),
+}));
+// The transaction wrapper is replaced with one that simply runs the callback.
+// It is NOT pretending to be transactional: atomicity is a property of a real
+// server and is asserted in the .db.test suites. What this file proves is the
+// ORDER and the CONDITIONS — that a hold is placed before the provider is
+// called, and that a refusal stops the sequence.
+vi.mock("../db/pool", () => ({
+  withTransaction: <T,>(fn: (client: unknown) => Promise<T>) => fn({}),
+  query: vi.fn(),
+  getPool: vi.fn(),
+  closePool: vi.fn(),
+  readMoneyMinor: vi.fn(),
+}));
+vi.mock("../db/repositories/ledger.repository", () => ({
+  ensureCustomerAccount,
+  ensureSettlementAccount: vi.fn(),
+  postTransaction: vi.fn(),
+  balanceOf: vi.fn(),
+  totalAcrossAllAccounts: vi.fn(),
+  entriesForTransaction: vi.fn(),
+  entriesForTransfer: vi.fn(),
+}));
+vi.mock("../db/repositories/holds.repository", () => ({
+  placeHold,
+  releaseHold,
+  captureHold: vi.fn(),
+  activeHoldTotal: vi.fn(),
+  availableBalanceOf: vi.fn(),
+  findHoldByTransfer: vi.fn(),
 }));
 vi.mock("../server/dwolla", () => ({
   createDwollaTransfer,
@@ -172,9 +211,22 @@ beforeEach(() => {
   });
   markSubmitted.mockResolvedValue({ id: "pg-transfer-1", state: "submitted" });
   markFailed.mockResolvedValue({ id: "pg-transfer-1", state: "failed" });
-  createDwollaTransfer.mockResolvedValue({
-    transferUrl: "https://api-sandbox.dwolla.invalid/transfers/transfer-1",
-    transferId: "transfer-1",
+  ensureCustomerAccount.mockResolvedValue({ id: "pg-account-alice" });
+  callOrder.length = 0;
+  placeHold.mockImplementation(async () => {
+    callOrder.push("placeHold");
+    return { kind: "placed", row: { id: "pg-hold-1", state: "active" } };
+  });
+  releaseHold.mockImplementation(async () => {
+    callOrder.push("releaseHold");
+    return { id: "pg-hold-1", state: "released" };
+  });
+  createDwollaTransfer.mockImplementation(async () => {
+    callOrder.push("provider");
+    return {
+      transferUrl: "https://api-sandbox.dwolla.invalid/transfers/transfer-1",
+      transferId: "transfer-1",
+    };
   });
   createTransactionRecord.mockResolvedValue({ $id: "tx-doc-1" });
 });
@@ -555,11 +607,93 @@ describe("K. idempotency", () => {
 
     await expect(initiateTransfer(VALID_INTENT)).rejects.toThrow();
 
-    // An explicit terminal state, not an abandoned `requested` row.
-    expect(markFailed).toHaveBeenCalledWith({
-      transferId: "pg-transfer-1",
-      failureCode: "PROVIDER_REJECTED",
+    // An explicit terminal state, not an abandoned `requested` row. The second
+    // argument is the transaction client: the failure and the release of the
+    // hold happen together, so asserting it is present is part of the point.
+    expect(markFailed).toHaveBeenCalledWith(
+      { transferId: "pg-transfer-1", failureCode: "PROVIDER_REJECTED" },
+      expect.anything()
+    );
+  });
+
+  it("RESERVES THE FUNDS BEFORE CALLING THE PROVIDER", async () => {
+    // The ordering is the mechanism, exactly as it is for the idempotency
+    // claim. A hold placed after the provider call reserves nothing: by then
+    // the money is already moving, and a concurrent request has already been
+    // let through on a view of the account that was never true.
+    await initiateTransfer(VALID_INTENT);
+
+    expect(callOrder).toEqual(["placeHold", "provider"]);
+  });
+
+  it("refuses when the funds are not available, and never reaches the provider", async () => {
+    placeHold.mockResolvedValue({
+      kind: "insufficient",
+      availableMinor: 5_00,
+      requestedMinor: 10_00,
     });
+
+    await expect(initiateTransfer(VALID_INTENT)).rejects.toBeInstanceOf(
+      InsufficientAvailableFundsError
+    );
+
+    // NO PROVIDER CALL AT ALL. Nothing is in motion to unwind.
+    expect(createDwollaTransfer).not.toHaveBeenCalled();
+    expect(markSubmitted).not.toHaveBeenCalled();
+    expect(createTransactionRecord).not.toHaveBeenCalled();
+  });
+
+  it("records an explicit failure for a refused transfer rather than abandoning it", async () => {
+    // The key stays claimed and the transfer reaches a terminal state, so a
+    // retry with the same key is answered from the record instead of running
+    // the same check again.
+    placeHold.mockResolvedValue({
+      kind: "insufficient",
+      availableMinor: 5_00,
+      requestedMinor: 10_00,
+    });
+
+    await expect(initiateTransfer(VALID_INTENT)).rejects.toBeInstanceOf(
+      InsufficientAvailableFundsError
+    );
+
+    expect(markFailed).toHaveBeenCalledWith(
+      {
+        transferId: "pg-transfer-1",
+        failureCode: "INSUFFICIENT_AVAILABLE_FUNDS",
+      },
+      expect.anything()
+    );
+  });
+
+  it("releases the reservation when the provider rejects the transfer", async () => {
+    createDwollaTransfer.mockImplementation(async () => {
+      callOrder.push("provider");
+      throw new Error("provider said no");
+    });
+
+    await expect(initiateTransfer(VALID_INTENT)).rejects.toThrow();
+
+    // Held, then released — money that never moved does not go on consuming
+    // this customer's available balance.
+    expect(callOrder).toEqual(["placeHold", "provider", "releaseHold"]);
+    expect(releaseHold).toHaveBeenCalledWith("pg-transfer-1", expect.anything());
+  });
+
+  it("does not reserve funds a second time on replay", async () => {
+    // A replayed key is answered from the record. Placing another hold would
+    // reserve the money twice and could refuse a transfer the customer can
+    // afford.
+    claimTransfer.mockResolvedValue({
+      kind: "replayed",
+      row: { id: "pg-transfer-1", state: "submitted" },
+    });
+
+    const result = await initiateTransfer(VALID_INTENT);
+
+    expect(result).toMatchObject({ replayed: true });
+    expect(placeHold).not.toHaveBeenCalled();
+    expect(createDwollaTransfer).not.toHaveBeenCalled();
   });
 
   it("does not record a provider reference it never received", async () => {
@@ -594,7 +728,9 @@ describe("K. idempotency", () => {
     // The extra key is stripped by the schema; the claim uses the actor's own
     // customer id.
     expect(claimTransfer).toHaveBeenCalledWith(
-      expect.objectContaining({ customerId: "pg-customer-alice" })
+      expect.objectContaining({ customerId: "pg-customer-alice" }),
+      // Claimed inside a transaction — the same one that reserves the funds.
+      expect.anything()
     );
   });
 

@@ -5,6 +5,10 @@ import type { PoolClient } from "pg";
 
 import { query, readMoneyMinor } from "../pool";
 import { toDatabaseError } from "../errors";
+import {
+  CUSTOMER_CREDIT_LIMIT_MINOR,
+  SETTLEMENT_CREDIT_LIMIT_MINOR,
+} from "../../domain/limits";
 
 export type LedgerAccountKind = "customer" | "settlement";
 
@@ -13,6 +17,8 @@ export type LedgerAccountRow = {
   customer_id: string | null;
   kind: LedgerAccountKind;
   currency: string;
+  /** How far below zero available balance may go. A positive magnitude. */
+  credit_limit_minor: string;
   created_at: Date;
   updated_at: Date;
 };
@@ -58,11 +64,11 @@ export async function ensureSettlementAccount(
 ): Promise<LedgerAccountRow> {
   const { rows } = await run<LedgerAccountRow>(
     client,
-    `INSERT INTO ledger_accounts (customer_id, kind, currency)
-     VALUES (NULL, 'settlement', 'USD')
+    `INSERT INTO ledger_accounts (customer_id, kind, currency, credit_limit_minor)
+     VALUES (NULL, 'settlement', 'USD', $1)
      ON CONFLICT (currency) WHERE kind = 'settlement' DO NOTHING
      RETURNING *`,
-    []
+    [String(SETTLEMENT_CREDIT_LIMIT_MINOR)]
   );
   if (rows[0]) return rows[0];
 
@@ -75,19 +81,25 @@ export async function ensureSettlementAccount(
   return existing.rows[0];
 }
 
-/** The customer's own account, created on first use. */
+/**
+ * The customer's own account, created on first use.
+ *
+ * The conflict path deliberately does NOT rewrite `credit_limit_minor`. An
+ * account that has been given a different limit keeps it; otherwise every
+ * transfer would quietly reset a decision somebody made deliberately.
+ */
 export async function ensureCustomerAccount(
   customerId: string,
   client?: PoolClient
 ): Promise<LedgerAccountRow> {
   const { rows } = await run<LedgerAccountRow>(
     client,
-    `INSERT INTO ledger_accounts (customer_id, kind, currency)
-     VALUES ($1, 'customer', 'USD')
+    `INSERT INTO ledger_accounts (customer_id, kind, currency, credit_limit_minor)
+     VALUES ($1, 'customer', 'USD', $2)
      ON CONFLICT (customer_id, currency) DO UPDATE
        SET customer_id = EXCLUDED.customer_id
      RETURNING *`,
-    [customerId]
+    [customerId, String(CUSTOMER_CREDIT_LIMIT_MINOR)]
   );
   return rows[0];
 }

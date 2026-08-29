@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { closePool, query } from "../db/pool";
+import { closePool, query, withTransaction } from "../db/pool";
 import { requireTestDatabase } from "../db/test-database";
 import { upsertBankingCustomer } from "../db/repositories/banking-customers.repository";
 import {
@@ -14,6 +14,12 @@ import {
   totalAcrossAllAccounts,
 } from "../db/repositories/ledger.repository";
 import { findWebhookEvent } from "../db/repositories/webhook-events.repository";
+import {
+  availableBalanceOf,
+  findHoldByTransfer,
+  placeHold,
+} from "../db/repositories/holds.repository";
+import { ensureCustomerAccount } from "../db/repositories/ledger.repository";
 import { handleDwollaWebhook } from "./settlement.service";
 
 /**
@@ -40,7 +46,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await query(
-    `TRUNCATE ledger_entries, ledger_transactions, ledger_accounts,
+    `TRUNCATE ledger_holds, ledger_entries, ledger_transactions, ledger_accounts,
               provider_webhook_events, transfers, linked_accounts,
               banking_customers CASCADE`
   );
@@ -70,10 +76,34 @@ async function submittedTransfer(
     currency: "USD",
   });
 
+  // The real orchestration reserves the funds before calling the provider, so a
+  // transfer that reaches `submitted` always carries an active hold. Settlement
+  // tests that skipped this step would be testing a state the system cannot
+  // actually be in.
+  await withTransaction(async (client) => {
+    const account = await ensureCustomerAccount(customer.id, client);
+    // ON THE SAME CLIENT. The account row is not committed yet, so a separate
+    // connection would update zero rows and silently leave the policy default.
+    await client.query(
+      "UPDATE ledger_accounts SET credit_limit_minor = $2 WHERE id = $1",
+      [account.id, String(amountMinor * 2)]
+    );
+    await placeHold(
+      { accountId: account.id, transferId: claimed.row.id, amountMinor },
+      client
+    );
+  });
+
   return markSubmitted({
     transferId: claimed.row.id,
     providerTransferId,
   });
+}
+
+/** The ledger account behind a transfer's customer. */
+async function accountFor(customerId: string): Promise<string> {
+  const account = await ensureCustomerAccount(customerId);
+  return account.id;
 }
 
 const body = (over: Record<string, unknown> = {}) =>
@@ -345,6 +375,63 @@ describe("events this system cannot act on", () => {
   });
 });
 
+describe("holds are resolved with the transfer", () => {
+  it("CAPTURES the hold when the transfer settles", async () => {
+    const transfer = await submittedTransfer(80_00);
+
+    await deliver(body());
+
+    const hold = await withTransaction((c) => findHoldByTransfer(transfer.id, c));
+    expect(hold?.state).toBe("captured");
+    expect(hold?.resolved_at).toBeInstanceOf(Date);
+
+    // Availability does NOT come back on capture: the money moved, and the
+    // entries now carry it. Limit 160_00, ledger balance -80_00, nothing held.
+    const accountId = await accountFor(transfer.customer_id);
+    expect(await withTransaction((c) => availableBalanceOf(accountId, c))).toBe(80_00);
+  });
+
+  it("RELEASES the hold when the provider reports a failure", async () => {
+    // A failed transfer whose hold stayed active would permanently reduce what
+    // this customer can commit, for money that never moved.
+    const transfer = await submittedTransfer(80_00);
+
+    await deliver(body({ topic: "customer_transfer_failed" }));
+
+    const hold = await withTransaction((c) => findHoldByTransfer(transfer.id, c));
+    expect(hold?.state).toBe("released");
+
+    // Fully restored: no entries were posted, and nothing is reserved.
+    const accountId = await accountFor(transfer.customer_id);
+    expect(await withTransaction((c) => availableBalanceOf(accountId, c))).toBe(160_00);
+  });
+
+  it("RELEASES the hold when the transfer is returned", async () => {
+    const transfer = await submittedTransfer(80_00);
+
+    await deliver(body({ topic: "customer_transfer_returned" }));
+
+    const hold = await withTransaction((c) => findHoldByTransfer(transfer.id, c));
+    expect(hold?.state).toBe("released");
+    const accountId = await accountFor(transfer.customer_id);
+    expect(await withTransaction((c) => availableBalanceOf(accountId, c))).toBe(160_00);
+  });
+
+  it("does not resolve the hold twice on a redelivery", async () => {
+    const transfer = await submittedTransfer(80_00);
+
+    await deliver(body());
+    const first = await withTransaction((c) => findHoldByTransfer(transfer.id, c));
+
+    await deliver(body());
+    const second = await withTransaction((c) => findHoldByTransfer(transfer.id, c));
+
+    expect(second?.state).toBe("captured");
+    // Unchanged, not re-stamped with a second resolution time.
+    expect(second?.resolved_at?.getTime()).toBe(first?.resolved_at?.getTime());
+  });
+});
+
 describe("atomicity of the settlement effect", () => {
   it("never records an event as processed without its effect", async () => {
     // The failure this guards: marking the event processed in one transaction
@@ -396,6 +483,14 @@ describe("atomicity of the settlement effect", () => {
     expect((await stateOf(transfer.id)).state).toBe("submitted");
     expect(await findWebhookEvent("evt-1")).toBeNull();
     expect(await ledgerTransactionCount()).toBe(0);
+
+    // The hold rolled back with everything else: still reserved, because the
+    // transfer is still in flight. A capture that survived a rolled-back
+    // settlement would free money the ledger never recorded moving.
+    const heldAfterFailure = await withTransaction((c) =>
+      findHoldByTransfer(transfer.id, c)
+    );
+    expect(heldAfterFailure?.state).toBe("active");
 
     // And the redelivery does apply.
     const retry = await deliver(body());

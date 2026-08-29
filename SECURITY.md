@@ -61,6 +61,8 @@ regressed. Nothing here is claimed on the strength of a code reading alone.
 | No ledger; balances read live from the provider | Milestone 6 | Double-entry entries in PostgreSQL, signed integer minor units, sum-to-zero enforced by a deferred constraint trigger, UPDATE and DELETE rejected by triggers. There is no balance column: a balance is `SUM(amount_minor)`, so it cannot drift from the entries. `ledger.db.test.ts` |
 | Provider acceptance treated as settlement | Milestone 7 | `submitted` and `settled` are distinct states. `settled` is reachable from exactly one function, only from `submitted`, and only when driven by a signature-verified provider event — enforced in the SQL predicate, not by a caller remembering to check. `settlement.service.db.test.ts` |
 | No webhooks — the system could never learn what the ACH network did | Milestone 7 | `/api/webhooks/dwolla` verifies an HMAC over the **raw** body with `timingSafeEqual` before parsing, and **refuses every delivery when the secret is unset** rather than falling through to accepting them. Events are deduplicated by a unique index on the provider's event id, so a redelivery has no second financial effect — asserted by delivering the same event twice, and concurrently, and counting ledger entries. |
+| No holds; an available balance was not distinguished from a ledger balance | Milestone 8 | A hold is placed in the same transaction as the idempotency claim and committed BEFORE the provider is called; captured on settlement, released on failure or return, always in the same transaction as the terminal state. Available balance is derived on every read — no stored balance and no stored available balance exist, and a test fails if either is added. `holds.db.test.ts` |
+| No concurrency protection — two simultaneous requests could both spend the same funds | Milestone 8 | Serialised by a row lock on the ledger account. Proven by holding one transaction open and asserting the second CANNOT decide until it commits, then sees the committed world — not by a parallel race, which can pass on timing luck against no lock at all. Ten concurrent requests against funds for five commit exactly five. |
 | A settled transfer could exist that the ledger had never recorded | Milestone 7 | The state change and the ledger posting share one transaction. Asserted by inducing a failure inside it and checking the transfer is still `submitted`, the event claim is gone, and the redelivery then applies cleanly. |
 
 The DTO tests are allowlist-based and run against a serialized payload rather
@@ -74,9 +76,8 @@ They are real, and this application should not be exposed to untrusted users.
 
 | Finding | Severity | Milestone |
 |---|---|---|
-| No holds; an available balance is not distinguished from a ledger balance | High | 8 |
-| No concurrency protection on balance-affecting operations | High | 8 |
 | No reconciliation against the provider, and no reversals | High | 9 |
+| Nothing credits a customer's ledger account, so the solvency check is an exposure cap rather than a balance check | Medium | 10 |
 | `transactionsSync` called without a cursor; results overwritten each page | High | 10 |
 | No rate limiting on authentication or money movement | Medium | unscheduled |
 | `shareableId` is base64 encoding presented as encryption | Medium | unscheduled |
@@ -100,6 +101,16 @@ this one route and pinned by an allowlist, not removed. Milestone 7 opened a
 second, for the same reason and under the same pin: settlement writes the
 transfer state and the ledger from a verified webhook. The allowlist is asserted
 by exact equality, so a third crossing fails the suite rather than joining it.
+
+`credit_limit_minor` is stated plainly rather than dressed up: it caps how much
+one customer may have committed and unsettled at once. It is NOT a bank-balance
+check, because nothing in this system knows what is in anyone's bank account —
+a customer's ledger balance is zero or negative and only ever decreases. The
+mechanism (checked under a row lock, in the claim's transaction, before the
+provider call) is what Milestone 8 delivers and what the tests prove; the number
+is a placeholder awaiting Plaid balances, at which point the same check becomes a
+real solvency check without changing shape. That gap is listed above rather than
+left implicit.
 
 The timestamp-derived status row moved from Milestone 7 to 11. Milestone 7 gave
 **transfers** a real, provider-driven state, and nothing derives that from a

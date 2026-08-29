@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
+
+import { CUSTOMER_CREDIT_LIMIT_MINOR } from "./domain/limits";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -758,6 +760,46 @@ describe("PostgreSQL stays server-side", () => {
   const STORED_BALANCE_COLUMN =
     /^\s*"?\w*balance\w*"?\s+(bigint|numeric|integer|int|decimal|money|smallint)\b/im;
 
+  it("the migration seeds the same credit limit the code hands out", () => {
+    // The migration fills existing rows; ensureCustomerAccount fills new ones.
+    // If the two drift, accounts created before and after a deploy get
+    // different allowances for no stated reason — and nothing would notice,
+    // because both paths would look correct in isolation.
+    const sql = readFileSync(
+      join(ROOT, "migrations", "1700000004000_holds-and-available-balance.sql"),
+      "utf8"
+    );
+
+    const seeded = /SET credit_limit_minor = (\d+)\s*\n\s*WHERE kind = 'customer'/.exec(
+      sql
+    );
+    expect(seeded, "the migration must seed customer credit limits").toBeTruthy();
+    expect(Number(seeded![1])).toBe(CUSTOMER_CREDIT_LIMIT_MINOR);
+  });
+
+  it("no stored available balance either", () => {
+    // Available balance is the ledger balance, less active holds, plus the
+    // account's limit — derived on every read. Storing it would be the same
+    // defect as a stored balance, one step further removed from the entries
+    // and the holds that justify it.
+    const migrationsDir = join(ROOT, "migrations");
+    const sql = readdirSync(migrationsDir)
+      .filter((f) => f.endsWith(".sql"))
+      .map((f) => readFileSync(join(migrationsDir, f), "utf8"))
+      .join("\n")
+      .replace(/--.*$/gm, "")
+      .replace(/'(?:[^']|'')*'/g, "''");
+
+    const NUMERIC = "(bigint|numeric|integer|int|decimal|money|smallint)\\b";
+
+    for (const forbidden of ["available_balance\\w*", "held_total\\w*", "reserved_\\w*"]) {
+      expect(
+        sql.toLowerCase(),
+        `schema must not declare a stored ${forbidden} column`
+      ).not.toMatch(new RegExp(`^\\s*"?${forbidden}"?\\s+${NUMERIC}`, "im"));
+    }
+  });
+
   it("the SQL schema declares no STORED balance column", () => {
     const migrationsDir = join(ROOT, "migrations");
     const sql = readdirSync(migrationsDir)
@@ -1040,6 +1082,7 @@ describe("migration tooling stays out of the request path", () => {
     "lib/db/repositories/banking-customers.repository.ts",
     "lib/db/repositories/webhook-events.repository.ts",
     "lib/db/repositories/ledger.repository.ts",
+    "lib/db/repositories/holds.repository.ts",
     "lib/db/pool.ts",
     "lib/db/errors.ts",
   ];
@@ -1090,6 +1133,7 @@ describe("migration tooling stays out of the request path", () => {
       "lib/db/repositories/transfers.repository.ts",
       "lib/db/repositories/webhook-events.repository.ts",
       "lib/db/repositories/ledger.repository.ts",
+      "lib/db/repositories/holds.repository.ts",
     ];
 
     const importers = Array.from(

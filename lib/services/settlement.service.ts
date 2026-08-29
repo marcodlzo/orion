@@ -15,6 +15,7 @@ import {
   ensureSettlementAccount,
   postTransaction,
 } from "../db/repositories/ledger.repository";
+import { captureHold, releaseHold } from "../db/repositories/holds.repository";
 import {
   digestPayload,
   parseDwollaEvent,
@@ -170,6 +171,11 @@ export async function handleDwollaWebhook(
     // it settles. Compensating entries belong to the reversal milestone, on top
     // of a settled posting.
     if (outcome === "settled") {
+      // The hold did its job: the money it reserved is now carried by real
+      // entries. Captured in the same transaction that posts them, so the
+      // reservation and the movement can never disagree.
+      await captureHold(updated.id, client);
+
       const customer = await ensureCustomerAccount(updated.customer_id, client);
       const settlement = await ensureSettlementAccount(client);
       const amountMinor = Number(updated.amount_minor);
@@ -185,6 +191,13 @@ export async function handleDwollaWebhook(
         },
         client
       );
+    }
+
+    // The money never moved. Give the reservation back, in the same
+    // transaction as the terminal state — otherwise a failed transfer would go
+    // on consuming the customer's available balance indefinitely.
+    if (outcome === "failed" || outcome === "returned") {
+      await releaseHold(updated.id, client);
     }
 
     // 5. Same transaction as the effect above.
