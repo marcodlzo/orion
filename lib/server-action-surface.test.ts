@@ -509,6 +509,25 @@ describe("admin client boundary", () => {
     expect(offenders).toEqual([...ADMIN_CLIENT_ALLOWED].sort());
   });
 
+  it("an admin client cannot be constructed without naming the approved factory", () => {
+    // THE GUARD ABOVE HAS A HOLE WITHOUT THIS ONE. `createAdminClient` is
+    // allowlisted by name, but `new Client().setKey(...)` grants exactly the
+    // same authority — the API key bypasses every Appwrite permission rule —
+    // and never mentions the factory. A module could hold a full admin client
+    // and the allowlist would report the codebase clean.
+    //
+    // Found while reviewing scripts/appwrite-schema.ts, which does this
+    // legitimately as operator tooling outside the scanned directories. The
+    // defect was never that script; it was that nothing would have noticed a
+    // server action doing the same thing.
+    const offenders = sources
+      .filter(({ code }) => /\.setKey\s*\(/.test(code))
+      .map(({ file }) => file)
+      .sort();
+
+    expect(offenders).toEqual(["lib/appwrite.ts"]);
+  });
+
   it("no action, server helper, component or route issues a raw admin query", () => {
     const offenders = sources
       .filter(({ file }) => !ADMIN_CLIENT_ALLOWED.includes(file))

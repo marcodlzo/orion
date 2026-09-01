@@ -15,7 +15,7 @@
     "db:migrate": "node --env-file-if-exists=.env.local node_modules/node-pg-migrate/bin/node-pg-migrate.js up",
     "db:rollback": "node --env-file-if-exists=.env.local node_modules/node-pg-migrate/bin/node-pg-migrate.js down",
     "db:status": "node --env-file-if-exists=.env.local node_modules/node-pg-migrate/bin/node-pg-migrate.js --dry-run up",
-    "test:db": "vitest run --config vitest.db.config.ts",
+    "test:db": "node --env-file-if-exists=.env.local node_modules/vitest/vitest.mjs run --config vitest.db.config.ts",
     "db:backfill": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-backfill.ts",
     "db:backfill:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-backfill.ts --commit",
     "db:verify": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-verify.ts",
@@ -23,7 +23,9 @@
     "plaid:sync": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/plaid-sync.ts",
     "credentials:check": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/check-credential-keys.ts",
     "credentials:encrypt": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/encrypt-credentials.ts",
-    "credentials:encrypt:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/encrypt-credentials.ts --commit"
+    "credentials:encrypt:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/encrypt-credentials.ts --commit",
+    "appwrite:schema": "node --env-file-if-exists=.env.local --import tsx scripts/appwrite-schema.ts",
+    "appwrite:schema:apply": "node --env-file-if-exists=.env.local --import tsx scripts/appwrite-schema.ts --apply"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",
