@@ -16,13 +16,15 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import {
-  Client,
-  Databases,
-  IndexType,
-  RelationMutate,
-  RelationshipType,
-} from "node-appwrite";
+// TablesDB, not node-appwrite's Databases. The installed SDK speaks the legacy
+// DocumentsDB API, whose routes now return 401 on this Appwrite Cloud whatever
+// scopes the key holds — verified route by route against the live project.
+// See scripts/appwrite-tablesdb.ts.
+import { TablesDbClient } from "./appwrite-tablesdb";
+
+const IndexType = { Unique: "unique", Key: "key" } as const;
+const RelationshipType = { ManyToOne: "manyToOne" } as const;
+const RelationMutate = { Restrict: "restrict" } as const;
 
 type StringAttributeSpec = {
   kind: "string";
@@ -316,7 +318,7 @@ function safeError(error: unknown): string {
 }
 
 async function createAttribute(
-  databases: Databases,
+  databases: TablesDbClient,
   config: SchemaConfig,
   collection: ResolvedCollection,
   attribute: AttributeSpec
@@ -327,10 +329,7 @@ async function createAttribute(
       collection.id,
       attribute.key,
       attribute.size,
-      attribute.required,
-      undefined,
-      false,
-      false
+      attribute.required
     );
     return;
   }
@@ -343,13 +342,12 @@ async function createAttribute(
     RelationshipType.ManyToOne,
     false,
     attribute.key,
-    undefined,
     RelationMutate.Restrict
   );
 }
 
 async function ensureAttribute(
-  databases: Databases,
+  databases: TablesDbClient,
   config: SchemaConfig,
   collection: ResolvedCollection,
   attribute: AttributeSpec,
@@ -408,7 +406,7 @@ async function ensureAttribute(
 }
 
 async function ensureIndex(
-  databases: Databases,
+  databases: TablesDbClient,
   config: SchemaConfig,
   collection: ResolvedCollection,
   index: IndexSpec,
@@ -471,11 +469,11 @@ async function ensureIndex(
 
 export async function synchronizeSchema(options: { apply: boolean }): Promise<Summary> {
   const config = resolveSchemaConfig();
-  const client = new Client()
-    .setEndpoint(config.endpoint)
-    .setProject(config.projectId)
-    .setKey(config.apiKey);
-  const databases = new Databases(client);
+  const databases = new TablesDbClient({
+    endpoint: config.endpoint,
+    projectId: config.projectId,
+    apiKey: config.apiKey,
+  });
   const summary: Summary = {
     createdAttributes: 0,
     createdIndexes: 0,
@@ -498,7 +496,10 @@ export async function synchronizeSchema(options: { apply: boolean }): Promise<Su
       ])
     );
     const indexes = new Map(
-      indexList.indexes.map((index) => [index.key, index as ExistingIndex])
+      (indexList.indexes as unknown as ExistingIndex[]).map((index) => [
+        index.key,
+        index,
+      ])
     );
 
     for (const attribute of collection.attributes) {
