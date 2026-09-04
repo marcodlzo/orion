@@ -22,7 +22,13 @@ export const BankDropdown = ({
 }: BankDropdownProps) => {
   const searchParams = useSearchParams();
   const router = useRouter();
+  // DEFENCE IN DEPTH. The page above renders an empty state instead of this
+  // component, but `useState(accounts[0])` on an empty list made `selected`
+  // undefined and `selected.id` below crashed the whole route — so the
+  // component must not depend on the caller remembering.
   const [selected, setSeclected] = useState(accounts[0]);
+
+  if (!selected) return null;
 
   const handleBankChange = (id: string) => {
     const account = accounts.find((account) => account.appwriteItemId === id)!;

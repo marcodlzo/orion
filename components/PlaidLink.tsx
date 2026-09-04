@@ -26,12 +26,24 @@ const PlaidLink = ({ variant }: PlaidLinkProps) => {
     getLinkToken();
   }, []);
 
+  const [linkError, setLinkError] = useState("");
+
   const onSuccess = useCallback<PlaidLinkOnSuccess>(async (public_token: string) => {
-    await exchangePublicToken({
+    setLinkError("");
+
+    const result = await exchangePublicToken({
       publicToken: public_token,
     })
 
-    router.push('/');
+    // NAVIGATE ONLY ON SUCCESS. This used to push to the dashboard
+    // unconditionally, so a failed link was indistinguishable from a working
+    // one — the user landed on a page with no bank and no explanation.
+    if (result?.publicTokenExchange === "complete") {
+      router.push('/');
+      return;
+    }
+
+    setLinkError("We could not finish linking that bank. Please try again.");
   }, [router])
   
   const config: PlaidLinkOptions = {
@@ -43,6 +55,11 @@ const PlaidLink = ({ variant }: PlaidLinkProps) => {
   
   return (
     <>
+      {linkError ? (
+        <p role="alert" className="text-14 mb-2 text-red-500">
+          {linkError}
+        </p>
+      ) : null}
       {variant === 'primary' ? (
         <Button
           onClick={() => open()}

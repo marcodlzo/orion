@@ -29,7 +29,12 @@ import {
 import { createSessionClient } from "../appwrite";
 import { plaidClient } from '@/lib/plaid';
 import { encryptId, extractCustomerIdFromUrl, parseStringify } from "../utils";
-import { addFundingSource, createDwollaCustomer } from "../server/dwolla";
+import {
+  addFundingSource,
+  createDwollaCustomer,
+  describeDwollaError,
+} from "../server/dwolla";
+import { plaidErrorCode } from "../plaid-sync/adapter";
 import { requireActor, SESSION_COOKIE } from "../auth/actor";
 import { isUnauthenticated } from "../auth/errors";
 import {
@@ -218,6 +223,11 @@ export const createLinkToken = async () => {
 export const exchangePublicToken = async ({
   publicToken,
 }: exchangePublicTokenProps) => {
+  // A START LINE, so "never called" is distinguishable from "called and
+  // failed". Without it a link that never reached onSuccess and a link that
+  // threw look identical from the outside: no bank, no error, no clue.
+  console.log("Linking a bank: exchanging the public token");
+
   try {
     const actor = await requireActor();
 
@@ -282,9 +292,16 @@ export const exchangePublicToken = async ({
         // The ACCOUNT ID, never the error: a Plaid or Dwolla error echoes the
         // request, and the request carries the access token and the processor
         // token.
+        // THE ACCOUNT ID AND A SAFE DESCRIPTION. The id alone was not enough to
+        // diagnose anything — four accounts failed and the log said only that
+        // they had. Both describers below emit a provider CODE and, for Dwolla,
+        // the rejected FIELD PATHS; neither emits a message or a request body,
+        // which is where the access token and processor token live.
         console.error(
           "Failed to link one account on the item:",
-          accountData.account_id
+          accountData.account_id,
+          "|",
+          plaidErrorCode(error) ?? describeDwollaError(error)
         );
         failed.push(accountData.account_id);
       }
@@ -296,6 +313,10 @@ export const exchangePublicToken = async ({
 
     revalidatePath("/");
 
+    console.log(
+      `Linking a bank: complete — ${linked} account(s) linked, ${failed.length} failed`
+    );
+
     return parseStringify({
       publicTokenExchange: "complete",
       linkedAccounts: linked,
@@ -303,7 +324,14 @@ export const exchangePublicToken = async ({
         accountsResponse.data.accounts.length - linkable.length + failed.length,
     });
   } catch (error) {
-    console.error("An error occurred while creating exchanging token:", error);
+    console.error(
+      "Linking a bank FAILED:",
+      error instanceof Error ? error.message : "unknown error"
+    );
+    // Reported rather than swallowed. Returning undefined told the caller
+    // nothing, and the caller navigated to the dashboard as if it had worked —
+    // so a failed link looked exactly like a successful one.
+    return parseStringify({ publicTokenExchange: "failed" });
   }
 }
 

@@ -4,6 +4,7 @@ import TransactionsTable from '@/components/TransactionsTable';
 import { getAccount, getAccounts } from '@/lib/server/banks';
 import { getLoggedInUser } from '@/lib/actions/user.actions';
 import { formatMinorUnits } from '@/lib/domain/money';
+import NoLinkedAccounts from '@/components/NoLinkedAccounts';
 import React from 'react'
 
 const TransactionHistory = async ({ searchParams: { id, page }}:SearchParamProps) => {
@@ -11,23 +12,42 @@ const TransactionHistory = async ({ searchParams: { id, page }}:SearchParamProps
   const loggedIn = await getLoggedInUser();
   const accounts = await getAccounts()
 
-  if(!accounts) return;
-  
-  const accountsData = accounts?.data;
+  const accountsData = accounts?.data ?? [];
   const appwriteItemId = (id as string) || accountsData[0]?.appwriteItemId;
+
+  // Nothing to look up, and nothing to render. Asking getAccount for an
+  // undefined id produced "Bank not found" on every page load.
+  if (accountsData.length === 0 || !appwriteItemId) {
+    return (
+      <div className="transactions">
+        <div className="transactions-header">
+          <HeaderBox
+            title="Transaction History"
+            subtext="See your bank details and transactions."
+          />
+        </div>
+        <div className="space-y-6">
+          <NoLinkedAccounts action="see your transaction history" />
+        </div>
+      </div>
+    );
+  }
 
   const account = await getAccount({ appwriteItemId })
 
+  // getAccount swallows its errors and returns undefined. Until that changes,
+  // every read below has to survive it rather than throw on `.length`.
+  const transactions = account?.transactions ?? [];
 
-const rowsPerPage = 10;
-const totalPages = Math.ceil(account?.transactions.length / rowsPerPage);
+  const rowsPerPage = 10;
+  const totalPages = Math.ceil(transactions.length / rowsPerPage);
 
-const indexOfLastTransaction = currentPage * rowsPerPage;
-const indexOfFirstTransaction = indexOfLastTransaction - rowsPerPage;
+  const indexOfLastTransaction = currentPage * rowsPerPage;
+  const indexOfFirstTransaction = indexOfLastTransaction - rowsPerPage;
 
-const currentTransactions = account?.transactions.slice(
-  indexOfFirstTransaction, indexOfLastTransaction
-)
+  const currentTransactions = transactions.slice(
+    indexOfFirstTransaction, indexOfLastTransaction
+  )
   return (
     <div className="transactions">
       <div className="transactions-header">

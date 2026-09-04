@@ -126,9 +126,41 @@ export const createFundingSource = async (
       })
       .then((res) => res.headers.get("location"));
   } catch (err) {
-    console.error("Creating a Funding Source Failed: ", err);
+    console.error("Creating a funding source failed:", describeDwollaError(err));
   }
 };
+
+/**
+ * An operator-safe description of a Dwolla failure.
+ *
+ * CODE AND FIELD PATHS ONLY. A Dwolla error body echoes the request, and a
+ * customer request carries SSN, date of birth and a full address — so logging
+ * the raw error, which is what these catch blocks used to do, put exactly the
+ * data this application refuses to persist into the server log instead.
+ *
+ * `_embedded.errors[].message` is dropped for the same reason: it quotes the
+ * offending value. The PATH ("/ssn", "/dateOfBirth") says which field was
+ * rejected, which is what an operator needs, and reveals nothing.
+ */
+export function describeDwollaError(error: unknown): string {
+  const e = error as {
+    status?: number;
+    body?: {
+      code?: string;
+      _embedded?: { errors?: Array<{ code?: string; path?: string }> };
+    };
+  };
+
+  const status = e?.status ?? "?";
+  const code = e?.body?.code ?? "unknown";
+  const fields = (e?.body?._embedded?.errors ?? [])
+    .map((f) => `${f.path ?? "?"}:${f.code ?? "?"}`)
+    .join(", ");
+
+  return fields
+    ? `${status} ${code} — rejected fields: ${fields}`
+    : `${status} ${code}`;
+}
 
 export const createOnDemandAuthorization = async () => {
   try {
@@ -138,7 +170,7 @@ export const createOnDemandAuthorization = async () => {
     const authLink = onDemandAuthorization.body._links;
     return authLink;
   } catch (err) {
-    console.error("Creating an On Demand Authorization Failed: ", err);
+    console.error("Creating an on-demand authorization failed:", describeDwollaError(err));
   }
 };
 
@@ -150,7 +182,7 @@ export const createDwollaCustomer = async (
       .post("customers", newCustomer)
       .then((res) => res.headers.get("location"));
   } catch (err) {
-    console.error("Creating a Dwolla Customer Failed: ", err);
+    console.error("Creating a Dwolla customer failed:", describeDwollaError(err));
   }
 };
 
@@ -172,6 +204,6 @@ export const addFundingSource = async ({
     };
     return await createFundingSource(fundingSourceOptions);
   } catch (err) {
-    console.error("Transfer fund failed: ", err);
+    console.error("Transfer failed:", describeDwollaError(err));
   }
 };
