@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  LINK_TOKEN_BY_ACTOR,
   SIGN_IN_BY_ADDRESS,
   SIGN_IN_BY_EMAIL,
   SIGN_UP_BY_ADDRESS,
+  TOKEN_EXCHANGE_BY_ACTOR,
   TRANSFER_BY_ACTOR,
   bucketFor,
   hashSubject,
@@ -139,10 +141,13 @@ describe("the policy values themselves", () => {
       SIGN_IN_BY_EMAIL,
       SIGN_UP_BY_ADDRESS,
       TRANSFER_BY_ACTOR,
+      LINK_TOKEN_BY_ACTOR,
+      TOKEN_EXCHANGE_BY_ACTOR,
     ]) {
       expect(rule.limit, rule.scope).toBeGreaterThan(0);
       expect(rule.windowSeconds, rule.scope).toBeGreaterThan(0);
-      expect(Number.isInteger(rule.limit), rule.scope).toBe(true);
+      expect(Number.isSafeInteger(rule.limit), rule.scope).toBe(true);
+      expect(Number.isSafeInteger(rule.windowSeconds), rule.scope).toBe(true);
     }
   });
 });

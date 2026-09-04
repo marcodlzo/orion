@@ -95,6 +95,28 @@ describe("the limit is the limit", () => {
     expect(recorded).toBe(rule.limit + 5);
   });
 
+  it("saturates at the largest integer instead of overflowing", async () => {
+    // PostgreSQL evaluates function arguments before calling the function, so
+    // LEAST(hits + 1, 2147483647) still overflows when hits is already at the
+    // maximum. The guard has to prevent the addition itself from happening.
+    const rule = SIGN_IN_BY_ADDRESS;
+    const subject = "203.0.113.10";
+    const windowStart = windowStartFor(NOW, rule.windowSeconds);
+
+    await attempt(rule, subject);
+    await query(
+      `UPDATE rate_limit_counters
+          SET hits = 2147483647
+        WHERE bucket = $1 AND window_start = $2`,
+      [bucketFor(rule, subject), windowStart]
+    );
+
+    expect(await attempt(rule, subject)).toBe("refused");
+    expect(
+      await attemptsIn({ bucket: bucketFor(rule, subject), windowStart })
+    ).toBe(2147483647);
+  });
+
   it("reports a retry delay inside the window, never zero", async () => {
     const rule = SIGN_IN_BY_ADDRESS;
     for (let i = 0; i < rule.limit; i += 1) await attempt(rule, "203.0.113.11");
