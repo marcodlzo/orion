@@ -1454,8 +1454,18 @@ describe("migration tooling stays out of the request path", () => {
       // Inside the crypto boundary itself: the self-test proves the configured
       // keyring can actually protect a value. It is listed here rather than
       // allowlisting the operator script, so encrypt/decrypt stays confined to
-      // lib/crypto, the storage boundary, and the migration.
+      // lib/crypto, the storage boundaries, and the migration.
       "lib/crypto/self-test.ts",
+      // The UNSCOPED bank reader. It goes around banks.repository.ts by design
+      // — an operator sweep has no actor to scope by — which means it is a
+      // storage boundary in its own right and has to decrypt for the same
+      // reason the repository does. Without it the backfill handed CIPHERTEXT
+      // to Plaid as an access token; every account came back
+      // INVALID_ACCESS_TOKEN and the migration correctly refused to proceed.
+      //
+      // This is the rule being applied, not widened: every entry on this list
+      // is a place that reads or writes credentials AT REST.
+      "lib/migration/appwrite-source.ts",
       "lib/migration/credential-encryption.ts",
       "lib/repositories/banks.repository.ts",
     ]);

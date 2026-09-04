@@ -24,6 +24,7 @@ import { createHash } from "node:crypto";
 import { Query } from "node-appwrite";
 
 import { createAdminClient } from "../appwrite";
+import { decryptCredential, isEncrypted } from "../crypto/envelope";
 import { InfrastructureError } from "../auth/errors";
 
 const {
@@ -226,7 +227,42 @@ export function readAllLegacyUsers(): Promise<SourceScan<LegacyUserDocument>> {
   return readAll<LegacyUserDocument>(USER_COLLECTION_ID!, "user");
 }
 
-/** UNSCOPED. Every bank document. Operator tooling only. */
-export function readAllLegacyBanks(): Promise<SourceScan<LegacyBankDocument>> {
-  return readAll<LegacyBankDocument>(BANK_COLLECTION_ID!, "bank");
+/**
+ * UNSCOPED. Every bank document. Operator tooling only.
+ *
+ * DECRYPTS THE CREDENTIALS, because this reader goes around
+ * `banks.repository.ts` — which is where encryption and decryption live — and
+ * would otherwise hand ciphertext to callers as if it were an access token.
+ *
+ * That is not hypothetical: the first backfill run after credentials were
+ * encrypted passed ciphertext to Plaid and every account came back
+ * INVALID_ACCESS_TOKEN. The backfill refused to migrate them rather than
+ * inventing metadata, which is why it surfaced as a blocked migration instead
+ * of a corrupted one.
+ *
+ * Plaintext values are tolerated for records written before the encryption
+ * migration, on the same terms as the repository: a value that IS encrypted and
+ * fails to decrypt raises rather than being passed along.
+ */
+export async function readAllLegacyBanks(): Promise<SourceScan<LegacyBankDocument>> {
+  const scan = await readAll<LegacyBankDocument>(BANK_COLLECTION_ID!, "bank");
+
+  return {
+    ...scan,
+    documents: scan.documents.map((bank) => ({
+      ...bank,
+      accessToken: readCredential(bank, "accessToken"),
+      fundingSourceUrl: readCredential(bank, "fundingSourceUrl"),
+    })),
+  };
+}
+
+function readCredential(
+  bank: LegacyBankDocument,
+  field: "accessToken" | "fundingSourceUrl"
+): string {
+  const stored = bank[field];
+  if (typeof stored !== "string" || stored === "") return "";
+  if (!isEncrypted(stored)) return stored;
+  return decryptCredential(stored, { recordId: bank.$id, field });
 }
