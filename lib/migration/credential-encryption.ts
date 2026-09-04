@@ -12,7 +12,10 @@ import {
   isEncrypted,
   credentialsMatch,
 } from "../crypto/envelope";
-import { readAllLegacyBanks, type LegacyBankDocument } from "./appwrite-source";
+import {
+  readAllLegacyBanksAsStored,
+  type LegacyBankDocument,
+} from "./appwrite-source";
 
 const {
   APPWRITE_DATABASE_ID: DATABASE_ID,
@@ -53,7 +56,7 @@ export type EncryptionReport = {
 };
 
 export type EncryptionDeps = {
-  readBanks: typeof readAllLegacyBanks;
+  readBanks: typeof readAllLegacyBanksAsStored;
   updateDocument: (
     documentId: string,
     data: Record<string, string>
@@ -61,7 +64,7 @@ export type EncryptionDeps = {
 };
 
 export const defaultEncryptionDeps: EncryptionDeps = {
-  readBanks: readAllLegacyBanks,
+  readBanks: readAllLegacyBanksAsStored,
   updateDocument: async (documentId, data) => {
     const { database } = await createAdminClient();
     await database.updateDocument(

@@ -1440,6 +1440,32 @@ describe("migration tooling stays out of the request path", () => {
     }
   });
 
+  it("the encryption migration reads credentials as stored, never decrypted", () => {
+    // `credential-encryption.ts` decides one thing per field: is this value
+    // already encrypted? A reader that decrypts first answers no every time.
+    //
+    // THIS REGRESSED ONCE, IN THE COMMIT THAT TAUGHT THE SOURCE READER TO
+    // DECRYPT. That change was needed for the backfill, which hands access
+    // tokens to Plaid and was receiving ciphertext. But the encryption tool
+    // reads through the same module, and afterwards it reported
+    // `0 already encrypted` against a store where all six fields were. On
+    // commit it would have re-encrypted every one, and its refusal to rewrite
+    // ciphertext it cannot read — the guard that stops a value being destroyed
+    // permanently — became unreachable, because it never saw ciphertext at all.
+    //
+    // Nothing failed. Both suites stayed green and the tool printed a confident,
+    // wrong summary. Hence this test.
+    const mod = graph.get("lib/migration/credential-encryption.ts");
+    expect(mod, "the credential migration must exist").toBeTruthy();
+
+    const code = stripComments(mod!.code);
+
+    expect(code).toContain("readAllLegacyBanksAsStored");
+    // Scoped to a whole word so the "AsStored" name does not satisfy a
+    // substring check for the decrypting one.
+    expect(code).not.toMatch(/\breadAllLegacyBanks\b(?!AsStored)/);
+  });
+
   it("only the storage boundary and its migration handle ciphertext", () => {
     // Encryption belongs at the point of storage. Spreading encrypt/decrypt
     // through services would mean every caller deciding what to bind a ciphertext

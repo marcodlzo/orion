@@ -228,7 +228,25 @@ export function readAllLegacyUsers(): Promise<SourceScan<LegacyUserDocument>> {
 }
 
 /**
- * UNSCOPED. Every bank document. Operator tooling only.
+ * UNSCOPED. Every bank document EXACTLY AS STORED. Operator tooling only.
+ *
+ * The credentials come back in whatever form the datastore holds — ciphertext
+ * for anything written since the encryption migration, plaintext for anything
+ * older. Nothing here can be handed to a provider.
+ *
+ * This exists for `credential-encryption.ts`, which has to see the STORED form
+ * to do its job: its whole decision is "is this value already encrypted?", and
+ * a reader that decrypts first answers no every time. Reading through the
+ * decrypting variant made that tool report `0 already encrypted` against a
+ * store where every value was, which would have re-encrypted all of them and
+ * left its refusal-to-rewrite-unreadable-ciphertext guard unreachable.
+ */
+export function readAllLegacyBanksAsStored(): Promise<SourceScan<LegacyBankDocument>> {
+  return readAll<LegacyBankDocument>(BANK_COLLECTION_ID!, "bank");
+}
+
+/**
+ * UNSCOPED. Every bank document, with credentials USABLE. Operator tooling only.
  *
  * DECRYPTS THE CREDENTIALS, because this reader goes around
  * `banks.repository.ts` — which is where encryption and decryption live — and
@@ -245,7 +263,7 @@ export function readAllLegacyUsers(): Promise<SourceScan<LegacyUserDocument>> {
  * fails to decrypt raises rather than being passed along.
  */
 export async function readAllLegacyBanks(): Promise<SourceScan<LegacyBankDocument>> {
-  const scan = await readAll<LegacyBankDocument>(BANK_COLLECTION_ID!, "bank");
+  const scan = await readAllLegacyBanksAsStored();
 
   return {
     ...scan,
