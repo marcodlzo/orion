@@ -29,13 +29,13 @@ import { isPositive, tryParseUsd, type Money } from "../domain/money";
 // THE ONE PERMITTED CROSSING from a request path into lib/db. The
 // import-boundary suite names this file explicitly; a second crossing is a
 // milestone decision, not a refactor.
-import { findCustomerByAuthId } from "../db/repositories/banking-customers.repository";
+import { ensureBankingCustomer } from "../db/repositories/banking-customers.repository";
 import {
   claimTransfer,
   markFailed,
   markSubmitted,
 } from "../db/repositories/transfers.repository";
-import { withTransaction } from "../db/pool";
+import { withTransaction, type TransactionClient } from "../db/pool";
 import { ensureCustomerAccount } from "../db/repositories/ledger.repository";
 import { placeHold, releaseHold } from "../db/repositories/holds.repository";
 import type { TransferResultDTO } from "../dto/transfer.dto";
@@ -276,14 +276,19 @@ export async function executeTransfer(
   //    original transfer rather than creating a second one. Claiming after the
   //    call, or in the same transaction as it, would leave exactly the gap the
   //    key exists to close.
-  const customer = await requireBankingCustomer(actor);
-
   //    THE CLAIM AND THE HOLD ARE ONE TRANSACTION. Reserving the funds in a
   //    separate transaction from the claim would leave a window in which a
   //    transfer is claimed but its money is not spoken for, and a concurrent
   //    request arriving in that window would see funds that are already
   //    committed. Both commit together, before the provider is called.
   const commitment = await withTransaction(async (client) => {
+    //  Enrolment joins that transaction rather than preceding it. A customer
+    //  row that committed on its own, for a transfer that then failed to
+    //  claim, would leave an identity bridge for a customer who has never
+    //  transacted — harmless, but it makes the table's contents mean two
+    //  different things.
+    const customer = await resolveBankingCustomer(actor, client);
+
     const claim = await claimTransfer(
       {
         customerId: customer.id,
@@ -448,25 +453,55 @@ export async function executeTransfer(
 }
 
 /**
- * The PostgreSQL customer this actor corresponds to.
+ * The PostgreSQL customer this actor corresponds to, CREATING THE BRIDGE ROW
+ * on first use.
  *
  * The transfers table keys on the local customer id, not on an Appwrite
  * identifier, so the actor has to be resolved across the bridge before a claim
- * can be made. Derived from the SESSION-resolved actor — never from anything
- * the caller supplied.
+ * can be made. Both values are read from the SESSION-resolved actor and never
+ * from anything the caller supplied, which is what makes creating the row here
+ * safe: there is no identifier a request could offer to enrol somebody else.
  *
- * A missing row is not a lookup miss to paper over: it means this customer was
- * never migrated, and moving their money while their identity is unrepresented
- * would create a record nothing can be reconciled against.
+ * WHY THIS CREATES RATHER THAN REFUSES. It used to throw "not enrolled for
+ * transfers yet" whenever the row was absent, on the reasoning that a missing
+ * row meant an unmigrated customer whose transfer could not be reconciled. That
+ * reasoning held while the backfill was the only writer. It does not survive
+ * contact with a real signup: nothing in the application ever created this row,
+ * so EVERY new user was permanently unable to transfer until an operator ran
+ * `npm run db:backfill:commit` by hand. A registration flow that silently
+ * produces an account which cannot transact is not a migration boundary, it is
+ * a defect.
+ *
+ * The row is derived, not invented. `appwrite_auth_id` and
+ * `appwrite_user_document_id` both come from the verified session, and
+ * `requireActor()` has already refused an actor missing either. This writes
+ * exactly what the backfill would have written for the same user, which is why
+ * `db:verify` still reconciles afterwards.
+ *
+ * This is also the pattern the ledger already uses. `ensureCustomerAccount` and
+ * `ensureSettlementAccount` both create on first use; the identity bridge was
+ * the one record that did not, and the inconsistency is what produced the bug.
+ *
+ * NOT A NEW BOUNDARY CROSSING. This repository is already reachable from the
+ * request path — the lookup below has always run here — and the import-boundary
+ * suite pins it by exact equality. A different module would be a milestone.
  */
-async function requireBankingCustomer(actor: Actor): Promise<{ id: string }> {
-  const customer = await findCustomerByAuthId(actor.authId);
-  if (!customer) {
-    throw new InvalidTransferIntentError([
-      "This account is not enrolled for transfers yet",
-    ]);
-  }
-  return { id: customer.id };
+async function resolveBankingCustomer(
+  actor: Actor,
+  client: TransactionClient
+): Promise<{ id: string }> {
+  const { row } = await ensureBankingCustomer(
+    {
+      // BOTH FROM THE VERIFIED SESSION. This is the whole reason creating the
+      // row here is safe: there is no identifier a request could supply that
+      // would enrol it as, or attach it to, somebody else.
+      appwriteAuthId: actor.authId,
+      appwriteUserDocumentId: actor.userId,
+    },
+    client
+  );
+
+  return { id: row.id };
 }
 
 /**

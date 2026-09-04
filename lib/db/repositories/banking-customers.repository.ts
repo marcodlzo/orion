@@ -1,8 +1,12 @@
 // Server-only. PostgreSQL write boundary for banking_customers.
 //
 // Separate from the lib/repositories directory, which holds the Appwrite ones the
-// application still uses. Nothing in the application calls these yet — they
-// exist for the backfill. Runtime cutover is a later phase.
+// application still uses.
+//
+// ONE function here is on the request path: ensureBankingCustomer, called by the
+// transfer service to resolve — and if necessary create — the identity bridge
+// for the session's actor. The rest exist for the backfill and the verifier.
+// Full runtime cutover is still a later phase.
 import "server-only";
 
 import type { PoolClient } from "pg";
@@ -95,6 +99,58 @@ export async function upsertBankingCustomer(
   // xmax = 0 distinguishes a genuine INSERT from an UPDATE taken by the
   // conflict path. Without it a re-run would report every row as newly created.
   return { row, created: row.inserted };
+}
+
+/**
+ * The customer for this identity, creating the bridge row on first use.
+ *
+ * WHY THIS EXISTS. Nothing in the application ever wrote this table — only
+ * `npm run db:backfill` did. A user who signed up after the last backfill had
+ * no row, and the transfer path refused them with "not enrolled for transfers
+ * yet" forever. A registration flow that produces an account which cannot
+ * transact is a defect, not a migration boundary.
+ *
+ * Callers must pass identifiers resolved from the SESSION. Nothing here can
+ * check that, which is why the only caller is the transfer service immediately
+ * after `requireActor()`: an identifier taken from a request body would let a
+ * caller enrol as somebody else.
+ *
+ * Reads before writing, so the ordinary path takes no write. The upsert's
+ * ON CONFLICT is a no-op UPDATE, which would fire the updated_at trigger on
+ * every transfer and leave that column meaning "last transfer" rather than
+ * "last identity change".
+ */
+export async function ensureBankingCustomer(
+  input: BankingCustomerInput,
+  client?: PoolClient
+): Promise<{ row: BankingCustomerRow; created: boolean }> {
+  const existing = await findCustomerByAuthId(input.appwriteAuthId, client);
+
+  if (existing) {
+    // READING FIRST SKIPS THE UPSERT'S COLLISION CHECK, so it is repeated here.
+    // Without it the row is returned on auth id alone, and a bridge mapping
+    // this login to a DIFFERENT user document would be used anyway — attaching
+    // a transfer, its hold and its ledger entries to an identity the caller
+    // does not correspond to.
+    //
+    // Not something to reconcile in passing: both values are authoritative in
+    // their own store, and money must not move while which one is right is an
+    // open question.
+    if (existing.appwrite_user_document_id !== input.appwriteUserDocumentId) {
+      throw new IdentityConflictError({
+        field: `banking_customers.appwrite_auth_id=${input.appwriteAuthId}`,
+        stored: existing.appwrite_user_document_id,
+        incoming: input.appwriteUserDocumentId,
+      });
+    }
+    return { row: existing, created: false };
+  }
+
+  // The gap between the read and the write is safe rather than merely unlikely:
+  // two concurrent first transfers both see nothing, both insert, and the
+  // unique constraint on appwrite_auth_id decides — the loser takes the
+  // ON CONFLICT path and receives the winner's row instead of raising.
+  return upsertBankingCustomer(input, client);
 }
 
 export async function findCustomerByAuthId(

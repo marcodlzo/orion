@@ -33,6 +33,8 @@ const {
   createTransactionRecord,
   createDwollaTransfer,
   findCustomerByAuthId,
+  upsertBankingCustomer,
+  ensureBankingCustomer,
   claimTransfer,
   markSubmitted,
   markFailed,
@@ -49,6 +51,8 @@ const {
   createTransactionRecord: vi.fn(),
   createDwollaTransfer: vi.fn(),
   findCustomerByAuthId: vi.fn(),
+  upsertBankingCustomer: vi.fn(),
+  ensureBankingCustomer: vi.fn(),
   claimTransfer: vi.fn(),
   markSubmitted: vi.fn(),
   markFailed: vi.fn(),
@@ -105,7 +109,8 @@ vi.mock("../repositories/transactions.repository", async () => {
 });
 vi.mock("../db/repositories/banking-customers.repository", () => ({
   findCustomerByAuthId,
-  upsertBankingCustomer: vi.fn(),
+  upsertBankingCustomer,
+  ensureBankingCustomer,
   findCustomerByUserDocumentId: vi.fn(),
   countBankingCustomers: vi.fn(),
   listBankingCustomers: vi.fn(),
@@ -203,7 +208,20 @@ beforeEach(() => {
   authenticateAlice();
   getOwnedBankByDocumentId.mockResolvedValue(ALICE_BANK);
   findCounterpartyBankByAccountId.mockResolvedValue(BOB_BANK);
-  findCustomerByAuthId.mockResolvedValue({ id: "pg-customer-alice" });
+  // Already enrolled, which is every call after a customer's first. Enrolment
+  // itself — creating the row, and refusing a bridge that names a different
+  // user document — is a property of a unique constraint and is proven against
+  // a real server in transfers.service.db.test.ts. What this file proves is
+  // that the service asks for it with SESSION values, inside the claim's
+  // transaction.
+  ensureBankingCustomer.mockResolvedValue({
+    row: {
+      id: "pg-customer-alice",
+      appwrite_auth_id: "auth-alice",
+      appwrite_user_document_id: "user-doc-alice",
+    },
+    created: false,
+  });
   // A fresh claim: this call owns the attempt and nothing has been sent yet.
   claimTransfer.mockResolvedValue({
     kind: "claimed",
@@ -719,12 +737,65 @@ describe("K. idempotency", () => {
     expect(markFailed).not.toHaveBeenCalled();
   });
 
-  it("refuses a customer who was never migrated", async () => {
-    findCustomerByAuthId.mockResolvedValue(null);
+  it("enrols the customer from the session, inside the claim's transaction", async () => {
+    // BEHAVIOUR DELIBERATELY REVERSED. This used to assert a refusal for a
+    // customer with no bridge row, on the reasoning that a missing row meant an
+    // unmigrated customer whose transfer could not be reconciled. That held
+    // while `npm run db:backfill` was the only writer of the table — and it
+    // meant every user who signed up after the last backfill was permanently
+    // unable to transfer, because nothing in the application ever created the
+    // row.
+    //
+    // The refusal is not a safety property being given up. Both identifiers are
+    // read from the verified session, so this writes exactly what the backfill
+    // would have written for the same user.
+    ensureBankingCustomer.mockResolvedValue({
+      row: {
+        id: "pg-customer-alice",
+        appwrite_auth_id: "auth-alice",
+        appwrite_user_document_id: "user-doc-alice",
+      },
+      created: true,
+    });
+
+    await expect(initiateTransfer(VALID_INTENT)).resolves.toMatchObject({
+      status: "submitted",
+    });
+
+    // The SESSION's identifiers, and a transaction client rather than the pool:
+    // enrolling on its own connection would commit a bridge row for a transfer
+    // that then failed to claim.
+    expect(ensureBankingCustomer).toHaveBeenCalledWith(
+      {
+        appwriteAuthId: "auth-alice",
+        appwriteUserDocumentId: "user-doc-alice",
+      },
+      expect.anything()
+    );
+    expect(claimTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({ customerId: "pg-customer-alice" }),
+      expect.anything()
+    );
+  });
+
+  it("moves no money when enrolment refuses an identity collision", async () => {
+    // The bridge maps this login to somebody else's user document. The
+    // repository refuses; what matters here is that the refusal stops the
+    // sequence rather than being absorbed.
+    ensureBankingCustomer.mockRejectedValue(
+      new IdentityConflictError({
+        field: "banking_customers.appwrite_auth_id=auth-alice",
+        stored: "user-doc-someone-else",
+        incoming: "user-doc-alice",
+      })
+    );
 
     await expect(initiateTransfer(VALID_INTENT)).rejects.toBeInstanceOf(
-      InvalidTransferIntentError
+      IdentityConflictError
     );
+
+    expect(claimTransfer).not.toHaveBeenCalled();
+    expect(placeHold).not.toHaveBeenCalled();
     expect(createDwollaTransfer).not.toHaveBeenCalled();
   });
 
@@ -751,7 +822,20 @@ describe("K. idempotency", () => {
     authenticateAlice();
     getOwnedBankByDocumentId.mockResolvedValue(ALICE_BANK);
     findCounterpartyBankByAccountId.mockResolvedValue(BOB_BANK);
-    findCustomerByAuthId.mockResolvedValue({ id: "pg-customer-alice" });
+    // Already enrolled, which is every call after a customer's first. Enrolment
+  // itself — creating the row, and refusing a bridge that names a different
+  // user document — is a property of a unique constraint and is proven against
+  // a real server in transfers.service.db.test.ts. What this file proves is
+  // that the service asks for it with SESSION values, inside the claim's
+  // transaction.
+  ensureBankingCustomer.mockResolvedValue({
+    row: {
+      id: "pg-customer-alice",
+      appwrite_auth_id: "auth-alice",
+      appwrite_user_document_id: "user-doc-alice",
+    },
+    created: false,
+  });
     claimTransfer.mockResolvedValue({
       kind: "claimed",
       row: { id: "pg-transfer-1", state: "requested" },
