@@ -1111,6 +1111,14 @@ describe("migration tooling stays out of the request path", () => {
     // of a live Plaid call during SSR. READ-ONLY by construction — the module
     // that advances a cursor is a different file and stays operator-only.
     "lib/db/repositories/plaid-transactions.read.ts",
+    // Rate limiting. The FIRST entry reachable from an UNAUTHENTICATED action:
+    // signIn and signUp consult it before Appwrite is touched, which is the
+    // whole point — a limit that only applies after authentication does nothing
+    // against credential stuffing.
+    //
+    // It holds no credential and no PII. Buckets arrive hashed, so the table
+    // cannot enumerate the addresses or emails somebody attempted.
+    "lib/db/repositories/rate-limits.repository.ts",
     "lib/db/pool.ts",
     "lib/db/errors.ts",
   ];
@@ -1173,6 +1181,7 @@ describe("migration tooling stays out of the request path", () => {
       "lib/db/repositories/webhook-events.repository.ts",
       "lib/db/repositories/ledger.repository.ts",
       "lib/db/repositories/holds.repository.ts",
+      "lib/db/repositories/rate-limits.repository.ts",
     ];
 
     const importers = Array.from(
@@ -1183,10 +1192,43 @@ describe("migration tooling stays out of the request path", () => {
       )
     ).sort();
 
+    // A THIRD CROSSING, added deliberately for rate limiting.
+    //
+    // It is a service for the same reason the other two are. `signIn` and
+    // `signUp` are the callers, and an action body importing the repository
+    // would put a database call directly in a `'use server'` module — one
+    // refactor away from the browser bundle, and somewhere the fail-closed
+    // decision could be quietly re-made per call site instead of once here.
+    //
+    // The script is not a fourth crossing. It runs from a terminal, serves no
+    // request, and has no actor — the constraint this test enforces is that a
+    // REQUEST reaches a repository only through a service. Operator tooling
+    // reaching one directly is how every other script in this repository
+    // already works. It is listed rather than filtered out so that exact
+    // equality still holds and a new arrival, script or not, has to be argued
+    // for.
     expect(importers).toEqual([
+      "lib/services/rate-limit.service.ts",
       "lib/services/settlement.service.ts",
       "lib/services/transfers.service.ts",
+      "scripts/rate-limit-sweep.ts",
     ]);
+  });
+
+  it("no script is reachable from a request path", () => {
+    // The other half of the claim above. Listing a script as a permitted
+    // importer is only safe while nothing a request can reach imports a script,
+    // so that is asserted rather than assumed — otherwise the exception granted
+    // for operator tooling would quietly become a way into lib/db.
+    const requestEntries = Array.from(graph.values())
+      .filter((m) => m.isAction || m.isClient || m.file.startsWith("app/"))
+      .map((m) => m.file);
+
+    const reachableScripts = Array.from(closure(requestEntries)).filter((f) =>
+      f.startsWith("scripts/")
+    );
+
+    expect(reachableScripts).toEqual([]);
   });
 
   it("the webhook route delegates and does not decide", () => {

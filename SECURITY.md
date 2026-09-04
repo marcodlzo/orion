@@ -90,13 +90,37 @@ They are real, and this application should not be exposed to untrusted users.
 |---|---|---|
 | Nothing credits a customer's ledger account, so the solvency check is an exposure cap rather than a balance check | Medium | unscheduled |
 | No end-to-end tests; the server-owned transfer flow is not driven end to end | Medium | unscheduled |
-| No rate limiting on authentication or money movement | Medium | unscheduled |
 | `shareableId` is base64 encoding presented as encryption | Medium | unscheduled |
 
-Three rows now read **unscheduled**, and that is a correction rather than a
+Three rows read **unscheduled**, and that is a correction rather than a
 demotion: rate limiting and `shareableId` were tagged to Milestone 2, which
 closed without them. A finding pointing at a completed milestone is how work
 quietly disappears, so they are named as unowned until something claims them.
+
+RATE LIMITING HAS LEFT THIS TABLE. `signIn`, `signUp`, `initiateTransfer`,
+`createLinkToken` and `exchangePublicToken` consume a PostgreSQL-backed counter
+before doing any work. The counter is an atomic upsert, so concurrent requests
+cannot each read the same count and all decide they are under it — a test runs
+three times the limit in parallel and asserts exactly the limit gets through,
+and it is the ONLY test that fails when the upsert is replaced with a
+select-then-update. The limiter FAILS CLOSED: if the store cannot be reached the
+request is refused, because a limiter that opens under load hands an attacker
+unlimited attempts exactly when the system is least able to cope.
+
+`getLoggedInUser` and `logoutAccount` are deliberately unlimited, and a test
+asserts that rather than leaving it to be rediscovered. The first is called by
+the layout on every render, so a limit would put a write on every page view and
+a database blip would log everyone out at once. The second must not be
+refusable: preventing somebody ending their session is a harm, not a control.
+
+WHAT IT DOES NOT DO. The unauthenticated limits key on `x-forwarded-for`, which
+is a request header and is only trustworthy behind a proxy that overwrites it.
+Deployed without one, a client can give itself a fresh bucket per attempt. The
+authenticated limits key on the session-resolved actor and are unaffected. The
+per-email sign-in rule is deliberately looser than the per-address one, because
+a tight limit keyed on a victim's address is an account-lockout primitive; the
+genuinely safe version needs a proof-of-work or CAPTCHA step, which is not
+built.
 
 The credentials row has moved to Fixed. Access tokens and funding-source URLs
 are encrypted at rest, which removes what was blocking the PostgreSQL cutover —

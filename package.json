@@ -25,7 +25,8 @@
     "credentials:encrypt": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/encrypt-credentials.ts",
     "credentials:encrypt:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/encrypt-credentials.ts --commit",
     "appwrite:schema": "node --env-file-if-exists=.env.local --import tsx scripts/appwrite-schema.ts",
-    "appwrite:schema:apply": "node --env-file-if-exists=.env.local --import tsx scripts/appwrite-schema.ts --apply"
+    "appwrite:schema:apply": "node --env-file-if-exists=.env.local --import tsx scripts/appwrite-schema.ts --apply",
+    "rate-limit:sweep": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/rate-limit-sweep.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",

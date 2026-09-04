@@ -65,7 +65,25 @@ const {
 
 vi.mock("next/headers", () => ({
   cookies: () => ({ get: cookieGet, set: vi.fn(), delete: vi.fn() }),
+  headers: () => new Headers(),
 }));
+/**
+ * The rate limiter, always under its limit.
+ *
+ * A FAITHFUL FAKE: the real repository returns the hit count AFTER recording,
+ * and the service compares that against the rule. Returning 1 is "first attempt
+ * in this window", which is what these tests assume.
+ *
+ * Stubbing it is required, not cosmetic. The limiter FAILS CLOSED, so without a
+ * fake every action here refuses with RateLimiterUnavailableError before
+ * reaching the behaviour under test.
+ */
+vi.mock("../db/repositories/rate-limits.repository", () => ({
+  recordAttempt: vi.fn(async () => 1),
+  attemptsIn: vi.fn(async () => 0),
+  sweepExpiredCounters: vi.fn(async () => 0),
+}));
+
 
 vi.mock("../appwrite", () => ({
   createSessionClient: async () => ({

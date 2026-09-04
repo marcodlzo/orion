@@ -47,9 +47,58 @@ import {
 } from "../repositories/users.repository";
 import { createBankForActor } from "../repositories/banks.repository";
 import { toCurrentUserDTO } from "../dto/user.dto";
+import {
+  clientAddress,
+  consume,
+  consumeAll,
+} from "../services/rate-limit.service";
+import {
+  LINK_TOKEN_BY_ACTOR,
+  SIGN_IN_BY_ADDRESS,
+  SIGN_IN_BY_EMAIL,
+  SIGN_UP_BY_ADDRESS,
+  TOKEN_EXCHANGE_BY_ACTOR,
+} from "../rate-limit/policy";
 
-/** PUBLIC AUTH ENTRY — requiring a session to sign in would be circular. */
+/**
+ * WHY getLoggedInUser AND logoutAccount ARE NOT RATE LIMITED.
+ *
+ * Not an oversight, and not a gap to close later.
+ *
+ * `getLoggedInUser` is called by the root layout on every authenticated page
+ * render. A limit there would put a database write on the hot path of every page
+ * view, and because the limiter FAILS CLOSED, a PostgreSQL blip would present as
+ * every signed-in user being logged out at once. It performs no privileged work:
+ * it resolves the caller's own session and returns their own allowlisted DTO.
+ *
+ * `logoutAccount` must not be refusable. Preventing somebody from ending their
+ * session is a security harm, not a control — it is the one action whose failure
+ * leaves the user worse off than not calling it.
+ *
+ * The five actions that ARE limited are the ones that either accept
+ * unauthenticated input or spend money at a provider.
+ */
+
+/**
+ * PUBLIC AUTH ENTRY — requiring a session to sign in would be circular.
+ *
+ * RATE LIMITED ON TWO KEYS, and OUTSIDE the try below. The catch swallows
+ * everything into a console line and returns undefined, so a refusal placed
+ * inside it would be discarded and the caller would see an ordinary failed
+ * sign-in while the attacker kept going. The limiter has to be the thing that
+ * ends the request.
+ *
+ * Two rules, because neither alone is sufficient. Per-address stops one client
+ * grinding a password list. Per-email adds a bound that survives an attacker
+ * rotating addresses, and is deliberately looser because a tight limit keyed on
+ * a victim's email is a way to lock them out.
+ */
 export const signIn = async ({ email, password }: signInProps) => {
+  await consumeAll([
+    { rule: SIGN_IN_BY_ADDRESS, subject: clientAddress() },
+    { rule: SIGN_IN_BY_EMAIL, subject: email.trim().toLowerCase() },
+  ]);
+
   try {
     const session = await createEmailPasswordSession(email, password);
 
@@ -78,6 +127,12 @@ export const signIn = async ({ email, password }: signInProps) => {
  */
 export const signUp = async ({ password, ...userData }: SignUpParams) => {
   const { email, firstName, lastName } = userData;
+
+  // Outside the try, for the same reason as signIn: the catch discards
+  // everything. Tighter than the sign-in limits because each success creates a
+  // Dwolla customer and an Appwrite account, so abuse here costs money at a
+  // provider rather than only compute here.
+  await consume(SIGN_UP_BY_ADDRESS, clientAddress());
 
   try {
     const newUserAccount = await createAuthAccount({
@@ -173,8 +228,14 @@ export const logoutAccount = async () => {
 
 /** PROTECTED — the link token is minted for the session's identity. */
 export const createLinkToken = async () => {
+  // Authentication and the limit both sit above the try, so neither is
+  // swallowed into the console line below. Each call is a billable Plaid
+  // request, and an unauthenticated caller should be refused rather than handed
+  // an undefined that the browser reads as a link flow that simply did nothing.
+  const actor = await requireActor();
+  await consume(LINK_TOKEN_BY_ACTOR, actor.authId);
+
   try {
-    const actor = await requireActor();
     const user = await findUserByAuthId(actor.authId);
 
     const tokenParams = {
@@ -228,9 +289,13 @@ export const exchangePublicToken = async ({
   // threw look identical from the outside: no bank, no error, no clue.
   console.log("Linking a bank: exchanging the public token");
 
-  try {
-    const actor = await requireActor();
+  // Above the try, like the others. One call reaches Plaid twice and then Dwolla
+  // once per depository account on the Item, so a single request is several
+  // provider calls and the limit is what bounds them.
+  const actor = await requireActor();
+  await consume(TOKEN_EXCHANGE_BY_ACTOR, actor.authId);
 
+  try {
     const response = await plaidClient.itemPublicTokenExchange({
       public_token: publicToken,
     });

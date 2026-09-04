@@ -45,7 +45,27 @@ const {
 
 vi.mock("next/headers", () => ({
   cookies: () => ({ get: cookieGet, set: vi.fn(), delete: vi.fn() }),
+  // clientAddress() reads these for the unauthenticated limits. Empty means no
+  // forwarded header, which is the shared "unknown" bucket.
+  headers: () => new Headers(),
 }));
+/**
+ * The rate limiter, always under its limit.
+ *
+ * A FAITHFUL FAKE: the real repository returns the hit count AFTER recording,
+ * and the service compares that against the rule. Returning 1 is "first attempt
+ * in this window", which is what these tests assume.
+ *
+ * Stubbing it is required, not cosmetic. The limiter FAILS CLOSED, so without a
+ * fake every action here refuses with RateLimiterUnavailableError before
+ * reaching the behaviour under test.
+ */
+vi.mock("../db/repositories/rate-limits.repository", () => ({
+  recordAttempt: vi.fn(async () => 1),
+  attemptsIn: vi.fn(async () => 0),
+  sweepExpiredCounters: vi.fn(async () => 0),
+}));
+
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 
 vi.mock("../appwrite", () => ({
@@ -100,7 +120,7 @@ import {
   getLoggedInUser,
   logoutAccount,
 } from "./user.actions";
-import { InfrastructureError } from "../auth/errors";
+import { InfrastructureError, UnauthorizedError } from "../auth/errors";
 
 const ALICE = {
   $id: "user-doc-alice",
@@ -132,13 +152,30 @@ const noPrivilegedWorkHappened = () => {
 };
 
 describe("anonymous callers reach no privileged collaborator", () => {
+  // These two now REJECT rather than resolving to undefined.
+  //
+  // Both used to resolve `undefined`, because `requireActor()` sat inside a try
+  // whose catch logged and returned. That is the "swallow into console.log and
+  // return undefined" shape the project bans outright: the browser could not
+  // tell an expired session from a Plaid outage from a link that simply did
+  // nothing.
+  //
+  // Rate limiting forced the question, because a limit consulted inside that try
+  // would have been swallowed too and refused nothing. Authentication and the
+  // limit now both sit above it.
+  //
+  // The invariant under test is unchanged and is asserted exactly as before: an
+  // anonymous caller reaches no privileged collaborator. It is now satisfied
+  // sooner rather than differently.
   it("createLinkToken", async () => {
-    await createLinkToken();
+    await expect(createLinkToken()).rejects.toBeInstanceOf(UnauthorizedError);
     noPrivilegedWorkHappened();
   });
 
   it("exchangePublicToken", async () => {
-    await exchangePublicToken({ publicToken: "public-sandbox-token" });
+    await expect(
+      exchangePublicToken({ publicToken: "public-sandbox-token" })
+    ).rejects.toBeInstanceOf(UnauthorizedError);
     noPrivilegedWorkHappened();
   });
 
