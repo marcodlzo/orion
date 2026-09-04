@@ -119,7 +119,25 @@ const AuthForm = ({ type }: { type: string }) => {
       ): (
         <>
           <Form {...form}>
-            <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-8">
+            {/*
+              method="post" MATTERS EVEN THOUGH THIS FORM IS SUBMITTED BY
+              JAVASCRIPT. A <form> with no method defaults to GET, so any time
+              the client bundle fails to load — a broken deploy, a blocked
+              script, a stale .next — the browser falls back to a native submit
+              and puts EVERY FIELD IN THE URL. That was observed: a sign-up
+              landed as
+                /sign-up?...&ssn=...&password=...
+              which writes an SSN and a password into browser history, the
+              server access log, and any Referer sent to a third party.
+
+              POST does not make a no-JS submit work — there is no handler for
+              it — but it keeps the credentials out of the URL when it fails.
+            */}
+            <form
+              method="post"
+              onSubmit={form.handleSubmit(onSubmit)}
+              className="space-y-8"
+            >
               {type === 'sign-up' && (
                 <>
                   <div className="flex gap-4">
