@@ -1,12 +1,10 @@
 import HeaderBox from '@/components/HeaderBox'
 import PaymentTransferForm from '@/components/PaymentTransferForm'
 import { getAccounts } from '@/lib/server/banks';
-import { getLoggedInUser } from '@/lib/actions/user.actions';
 import NoLinkedAccounts from '@/components/NoLinkedAccounts';
 import React from 'react'
 
 const Transfer = async () => {
-  const loggedIn = await getLoggedInUser();
   const accounts = await getAccounts()
 
   const accountsData = accounts?.data ?? [];

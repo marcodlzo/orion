@@ -3,9 +3,19 @@ import { fileURLToPath } from "node:url";
 
 export default defineConfig({
   resolve: {
-    alias: {
+    alias: [
+      // Use the actual React server runtime Next 14 aliases into App Router.
+      // The standalone React 18 package has no cache(), and replacing it with
+      // a fake memo would conceal request-isolation bugs.
+      {
+        find: /^react$/,
+        replacement: fileURLToPath(new URL(
+          "./node_modules/next/dist/server/future/route-modules/app-page/vendored/rsc/react.js",
+          import.meta.url
+        )),
+      },
       // Mirrors the "@/*" -> "./*" alias in tsconfig.json.
-      "@": fileURLToPath(new URL("./", import.meta.url)),
+      { find: "@", replacement: fileURLToPath(new URL("./", import.meta.url)) },
 
       // "server-only" ships a conditional export: the "react-server" condition
       // resolves to an empty module, anything else to a module that throws.
@@ -13,10 +23,10 @@ export default defineConfig({
       // otherwise valid server module would fail to import under test.
       // Point it at the same empty entry Next.js uses rather than flipping
       // resolve conditions globally, which would also affect React.
-      "server-only": fileURLToPath(
+      { find: "server-only", replacement: fileURLToPath(
         new URL("./node_modules/server-only/empty.js", import.meta.url)
-      ),
-    },
+      ) },
+    ],
   },
   test: {
     environment: "node",

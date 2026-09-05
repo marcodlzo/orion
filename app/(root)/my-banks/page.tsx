@@ -5,8 +5,10 @@ import { getLoggedInUser } from '@/lib/actions/user.actions';
 import React from 'react'
 
 const MyBanks = async () => {
-  const loggedIn = await getLoggedInUser();
-  const accounts = await getAccounts()
+  const [loggedIn, accounts] = await Promise.all([
+    getLoggedInUser(),
+    getAccounts(),
+  ]);
 
   return (
     <section className='flex'>

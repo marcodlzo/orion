@@ -1,3 +1,12 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
+// Next installs this before loading its React server runtime. The renderer uses
+// it to retain the request's cache through awaits and concurrent server renders.
+Object.defineProperty(globalThis, "AsyncLocalStorage", {
+  value: AsyncLocalStorage,
+  configurable: true,
+});
+
 /**
  * Test environment bootstrap.
  *

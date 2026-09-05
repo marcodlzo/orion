@@ -1,6 +1,7 @@
 // Server-only. Approved home for createAdminClient.
 import "server-only";
 
+import { cache } from "react";
 import { ID, Query } from "node-appwrite";
 
 import type { Actor } from "../auth/actor";
@@ -102,6 +103,12 @@ function decryptBankRecord(document: unknown): BankRecord {
  * else's list.
  */
 export async function getOwnedBanks(actor: Actor): Promise<BankRecord[]> {
+  return readOwnedBanks(actor);
+}
+
+// requireActor returns the same actor object throughout a server render.
+// Including it in the key keeps different owners' queries separate.
+const readOwnedBanks = cache(async (actor: Actor): Promise<BankRecord[]> => {
   try {
     const { database } = await createAdminClient();
     const result = await database.listDocuments(DATABASE_ID!, BANK_COLLECTION_ID!, [
@@ -111,7 +118,7 @@ export async function getOwnedBanks(actor: Actor): Promise<BankRecord[]> {
   } catch (error) {
     throw new InfrastructureError("Failed to read the bank collection", { cause: error });
   }
-}
+});
 
 /**
  * OWNED — one bank belonging to the actor, by document id.
@@ -127,6 +134,15 @@ export async function getOwnedBankByDocumentId(
   actor: Actor,
   documentId: string
 ): Promise<BankRecord | null> {
+  return readOwnedBankByDocumentId(actor, documentId);
+}
+
+// The account reader and transaction reader both prove ownership through this
+// query. Share that proof only within the same render and for the same actor.
+const readOwnedBankByDocumentId = cache(async (
+  actor: Actor,
+  documentId: string
+): Promise<BankRecord | null> => {
   if (!documentId) return null;
 
   try {
@@ -139,7 +155,7 @@ export async function getOwnedBankByDocumentId(
   } catch (error) {
     throw new InfrastructureError("Failed to read the bank collection", { cause: error });
   }
-}
+});
 
 /**
  * OWNED — one bank belonging to the actor, by Plaid account id.

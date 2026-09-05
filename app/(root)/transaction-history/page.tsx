@@ -2,14 +2,12 @@ import HeaderBox from '@/components/HeaderBox'
 import { Pagination } from '@/components/Pagination';
 import TransactionsTable from '@/components/TransactionsTable';
 import { getAccount, getAccounts } from '@/lib/server/banks';
-import { getLoggedInUser } from '@/lib/actions/user.actions';
 import { formatMinorUnits } from '@/lib/domain/money';
 import NoLinkedAccounts from '@/components/NoLinkedAccounts';
 import React from 'react'
 
 const TransactionHistory = async ({ searchParams: { id, page }}:SearchParamProps) => {
   const currentPage = Number(page as string) || 1;
-  const loggedIn = await getLoggedInUser();
   const accounts = await getAccounts()
 
   const accountsData = accounts?.data ?? [];

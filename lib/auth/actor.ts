@@ -2,6 +2,7 @@
 // client. Must never be reachable from a client component.
 import "server-only";
 
+import { cache } from "react";
 import { cookies } from "next/headers";
 
 import { createSessionClient } from "../appwrite";
@@ -77,7 +78,9 @@ function isAuthFailure(error: unknown): boolean {
  * @throws ActorNotProvisionedError   session valid, internal identity missing
  * @throws InfrastructureError        could not determine identity
  */
-export async function requireActor(): Promise<Actor> {
+// React scopes this memo to one server render, including concurrent callers.
+// Never replace it with a persistent cache: every request must verify its session.
+export const requireActor = cache(async function requireActor(): Promise<Actor> {
   // 1. session cookie
   const session = cookies().get(SESSION_COOKIE);
   if (!session?.value) {
@@ -130,4 +133,4 @@ export async function requireActor(): Promise<Actor> {
 
   // 5. minimal identity only
   return { authId, userId, dwollaCustomerId };
-}
+});

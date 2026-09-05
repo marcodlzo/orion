@@ -4,6 +4,7 @@
 // rather than scattered across action modules.
 import "server-only";
 
+import { cache } from "react";
 import { ID, Query } from "node-appwrite";
 
 import { createAdminClient } from "../appwrite";
@@ -36,7 +37,11 @@ export type UserRecord = Record<string, unknown> & {
  * @returns the record, or null when the account has no internal user document
  * @throws InfrastructureError when the datastore cannot be reached
  */
-export async function findUserByAuthId(authId: string): Promise<UserRecord | null> {
+// Share the document already read by requireActor with profile/DTO readers.
+// This memo is discarded after the server render; writes are never memoized.
+export const findUserByAuthId = cache(async function findUserByAuthId(
+  authId: string
+): Promise<UserRecord | null> {
   let documents: unknown[];
   try {
     const { database } = await createAdminClient();
@@ -49,7 +54,7 @@ export async function findUserByAuthId(authId: string): Promise<UserRecord | nul
   }
 
   return (documents[0] as UserRecord | undefined) ?? null;
-}
+});
 
 /**
  * Create the internal user record that backs an Appwrite auth account.

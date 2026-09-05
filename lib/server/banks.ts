@@ -4,7 +4,7 @@
 // publicly callable server action.
 import "server-only";
 
-import { CountryCode } from "plaid";
+import { cache } from "react";
 
 import { plaidClient } from "../plaid";
 import { parseStringify } from "../utils";
@@ -25,6 +25,13 @@ import {
 // deliberately unreachable from here; an architecture test enforces the split.
 import { listTransactionsForOwnedAccounts } from "../db/repositories/plaid-transactions.read";
 
+// An Item can back several bank records. Share its complete response across
+// list and detail readers using the same decrypted token, never across renders.
+// Only call this after a repository has established the actor's ownership.
+const getPlaidAccounts = cache(async (accessToken: string) => {
+  const response = await plaidClient.accountsGet({ access_token: accessToken });
+  return response.data.accounts;
+});
 
 /**
  * OWNED — every account belonging to the authenticated actor.
@@ -34,7 +41,7 @@ import { listTransactionsForOwnedAccounts } from "../db/repositories/plaid-trans
  * user" query. It now derives identity itself, so there is no parameter to
  * get wrong.
  */
-export const getAccounts = async () => {
+export const getAccounts = cache(async () => {
   try {
     const actor = await requireActor();
     const banks = await getOwnedBanks(actor);
@@ -42,16 +49,14 @@ export const getAccounts = async () => {
     const accounts = await Promise.all(
       banks?.map(async (bank) => {
         // get each account info from plaid
-        const accountsResponse = await plaidClient.accountsGet({
-          access_token: bank.accessToken,
-        });
+        const plaidAccounts = await getPlaidAccounts(bank.accessToken);
 
         // THE ACCOUNT THIS BANK RECORD IS FOR, not accounts[0]. An Item owns
         // many accounts, and taking the first one showed the wrong balance
         // against every linked account but one — silently, because the shape
         // was always valid.
         const accountData =
-          accountsResponse.data.accounts.find(
+          plaidAccounts.find(
             (a) => a.account_id === bank.accountId
           ) ?? null;
 
@@ -86,7 +91,7 @@ export const getAccounts = async () => {
   } catch (error) {
     console.error("An error occurred while getting the accounts:", error);
   }
-};
+});
 
 /**
  * OWNED — one account belonging to the actor.
@@ -103,23 +108,21 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
     const bank = await getOwnedBankByDocumentId(actor, appwriteItemId);
     if (!bank) throw new NotFoundError("Bank not found");
 
-    // get account info from plaid
-    const accountsResponse = await plaidClient.accountsGet({
-      access_token: bank.accessToken,
-    });
+    // Ownership is proven before starting any provider or history read. The
+    // balances and the two history sources are independent and can overlap.
+    // The transaction repository still performs its own ownership check,
+    // deduplicated by the repository's per-render memo.
+    const [plaidAccounts, transferTransactionsData, storedRows] = await Promise.all([
+      getPlaidAccounts(bank.accessToken),
+      getTransactionsForOwnedBank(actor, bank.$id),
+      listTransactionsForOwnedAccounts([bank.accountId]),
+    ]);
 
     // The account this bank record names, not accounts[0].
-    const accountData = accountsResponse.data.accounts.find(
+    const accountData = plaidAccounts.find(
       (a) => a.account_id === bank.accountId
     );
     if (!accountData) throw new NotFoundError("Account not found");
-
-    // get transfer transactions from appwrite
-    // Ownership was proven above; this reads that bank's history.
-    const transferTransactionsData = await getTransactionsForOwnedBank(
-      actor,
-      bank.$id
-    );
 
     const transferTransactions = transferTransactionsData.documents.map(
       (transferData) =>
@@ -137,7 +140,6 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
     // ownership-scoped query returned for THIS actor, so it is the one account
     // id it is safe to read by. Passing the URL parameter through instead would
     // be an IDOR.
-    const storedRows = await listTransactionsForOwnedAccounts([bank.accountId]);
     const transactions = storedRows.map(toTransactionDTOFromStore);
 
     const account = toAccountSummaryDTO({ plaidAccount: accountData, bank });
