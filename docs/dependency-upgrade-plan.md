@@ -108,14 +108,27 @@ The high is `undici@5.28.4`, pinned by node-appwrite 12.
 ### The second reason to do this
 
 Appwrite Cloud moved schema management from the legacy
-`/databases/{id}/collections/...` routes to `/tablesdb/{id}/tables/...`. The
-legacy routes now return 401 `general_unauthorized_scope` regardless of which
-scopes the API key holds. This is not a permissions problem and no amount of
-ticking boxes in the console fixes it — the SDK is calling routes the server no
-longer authorises.
+`/databases/{id}/collections/...` routes to `/tablesdb/{id}/tables/...`.
 
-That was verified directly against the live project: every legacy route returned
-401 while every TablesDB equivalent returned 200 with the same key.
+CORRECTION, 2026-09-08. This section originally said the legacy routes return
+401 `general_unauthorized_scope` "regardless of which scopes the API key holds".
+That claim was too strong and is wrong.
+
+What was actually observed, against the schema-setup key that carried 27 scopes:
+every legacy route returned 401 while every TablesDB equivalent returned 200.
+That does show the two route families are authorised differently, which is why
+the workaround was written.
+
+Re-probed with the key currently in `NEXT_APPWRITE_KEY`, **both** families return
+401. So the earlier behaviour was route-level authorisation observed through a
+broadly scoped key, not a property that holds for any key.
+
+The current key is a runtime key: it reads and writes documents perfectly well —
+`npm run db:backfill` reads 2 users and 3 banks and enriches all three — and
+simply does not carry schema-management scopes. That separation is correct and
+should be kept. Schema work needs its own operator key, created for the purpose
+and deleted afterwards, rather than schema scopes being added to the key the
+application runs with.
 
 The workaround is a hand-written HTTP client, `scripts/appwrite-tablesdb.ts`,
 which keeps the old method names so `scripts/appwrite-schema.ts` did not have to
