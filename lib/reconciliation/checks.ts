@@ -235,7 +235,7 @@ export function checkAgainstProvider(
   // We are counting money the provider says came back. This one is critical:
   // the ledger is overstating what moved.
   if (
-    (providerStatus === "failed" || providerStatus === "returned") &&
+    (providerStatus === "pending" || providerStatus === "failed" || providerStatus === "returned") &&
     transfer.state === "settled"
   ) {
     say(

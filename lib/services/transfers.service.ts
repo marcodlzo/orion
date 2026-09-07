@@ -424,9 +424,8 @@ export async function executeTransfer(
   );
 
   // 6. Identities are server-derived. The caller supplies neither side.
-  let record;
   try {
-    record = await createTransactionRecord({
+    await createTransactionRecord({
       name: intent.note || "Transfer",
       // Degraded to the legacy string column here and nowhere else.
       amount: toLegacyTransactionAmount(intent.amount),
@@ -445,7 +444,7 @@ export async function executeTransfer(
   // 7. narrow result
   return {
     replayed: false,
-    transactionId: record.$id,
+    transactionId: claim.row.id,
     // "submitted", never "completed": ACH settles asynchronously and this
     // application has no webhook or state machine to learn the outcome.
     status: "submitted",

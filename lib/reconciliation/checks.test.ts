@@ -43,6 +43,14 @@ const codes = (findings: ReturnType<typeof checkTransfer>) =>
   findings.map((f) => f.code).sort();
 
 describe("a consistent transfer produces no findings", () => {
+  it("reports a local settlement while the provider is still pending", () => {
+    expect(checkAgainstProvider(snapshot(), "pending")).toEqual([{
+      code: "PROVIDER_CONTRADICTS_SETTLEMENT",
+      transferId: "transfer-1",
+      detail: "internal=settled provider=pending",
+      severity: "critical",
+    }]);
+  });
   it("settled, posted, nothing held", () => {
     expect(checkTransfer(snapshot(), NOW)).toEqual([]);
   });

@@ -10,7 +10,6 @@ import { InfrastructureError } from "../auth/errors";
 import {
   decryptCredential,
   encryptCredential,
-  isEncrypted,
 } from "../crypto/envelope";
 
 const {
@@ -85,7 +84,6 @@ function decryptBankRecord(document: unknown): BankRecord {
   const read = (field: "accessToken" | "fundingSourceUrl"): string => {
     const stored = record[field];
     if (typeof stored !== "string" || stored === "") return "";
-    if (!isEncrypted(stored)) return stored;
     return decryptCredential(stored, { recordId: record.$id, field });
   };
 

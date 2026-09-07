@@ -3,6 +3,8 @@ import { createRequire } from "node:module";
 import { createElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { encryptCredential } from "../crypto/envelope";
+
 const { accountGet, listDocuments, accountsGet, readTransactions } = vi.hoisted(() => ({
   accountGet: vi.fn(),
   listDocuments: vi.fn(),
@@ -66,12 +68,34 @@ const user = (owner: string) => ({
   firstName: owner, lastName: "Test", email: `${owner}@example.com`,
   ssn: "private-ssn", dateOfBirth: "1990-01-01",
 });
-const bank = (owner: string, suffix: string, item = suffix) => ({
-  $id: `bank-${owner}-${suffix}`, userId: { $id: `user-${owner}` },
-  accountId: `account-${owner}-${suffix}`, bankId: `item-${owner}-${item}`,
-  accessToken: `test-token-${owner}-${item}`, fundingSourceUrl: "private-funding-source",
-  shareableId: `share-${owner}-${suffix}`,
-});
+/**
+ * Credentials are stored ENCRYPTED, so fixtures must be too.
+ *
+ * Reads stopped tolerating plaintext, which is what this helper exists for.
+ * Each value is bound to the record id and field it belongs to, exactly as the
+ * repository writes it — a ciphertext built for a different record or field
+ * fails to decrypt rather than being used, and that binding is the protection
+ * against one being copied into another user's row.
+ */
+const stored = (recordId: string, field: "accessToken" | "fundingSourceUrl", value: string) =>
+  encryptCredential(value, { recordId, field });
+
+const bank = (owner: string, suffix: string, item = suffix) => {
+  const $id = `bank-${owner}-${suffix}`;
+  return {
+    $id, userId: { $id: `user-${owner}` },
+    accountId: `account-${owner}-${suffix}`, bankId: `item-${owner}-${item}`,
+    // The plaintext is kept alongside so the Plaid stub can match on what the
+    // repository actually hands it. The repository DECRYPTS before calling the
+    // provider, so a stub matching on the stored ciphertext would never fire —
+    // and would fail in a way that looks like a caching bug rather than a
+    // fixture one.
+    plainAccessToken: `provider-credential-${owner}-${item}`,
+    accessToken: stored($id, "accessToken", `provider-credential-${owner}-${item}`),
+    fundingSourceUrl: stored($id, "fundingSourceUrl", "private-funding-source"),
+    shareableId: `share-${owner}-${suffix}`,
+  };
+};
 const banks = [bank("alice", "checking", "one"), bank("alice", "savings", "one"),
   bank("alice", "other", "two"), bank("bob", "checking", "one")];
 const USERS = process.env.APPWRITE_USER_COLLECTION_ID;
@@ -107,7 +131,7 @@ beforeEach(() => {
     throw new Error("Unexpected collection");
   });
   accountsGet.mockImplementation(async ({ access_token }: { access_token: string }) => ({
-    data: { accounts: banks.filter((b) => b.accessToken === access_token).map((b) => ({
+    data: { accounts: banks.filter((b) => b.plainAccessToken === access_token).map((b) => ({
       account_id: b.accountId, name: b.accountId, mask: "1234", type: "depository",
       balances: { current: b.$id.includes("savings") ? 20 : 10 },
     })) },

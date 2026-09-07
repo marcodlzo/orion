@@ -1104,6 +1104,8 @@ describe("migration tooling stays out of the request path", () => {
   const RUNTIME_DB_ALLOWLIST = [
     "lib/db/repositories/transfers.repository.ts",
     "lib/db/repositories/banking-customers.repository.ts",
+    // Approved lifecycle step: actor-scoped account linking creates its bridge.
+    "lib/db/repositories/linked-accounts.repository.ts",
     "lib/db/repositories/webhook-events.repository.ts",
     "lib/db/repositories/ledger.repository.ts",
     "lib/db/repositories/holds.repository.ts",
@@ -1161,7 +1163,6 @@ describe("migration tooling stays out of the request path", () => {
         // path uses them to paginate correctly without persisting anything.
         f === "lib/plaid-sync/sync.ts" ||
         f === "lib/db/repositories/plaid-items.repository.ts" ||
-        f === "lib/db/repositories/linked-accounts.repository.ts" ||
         f === "lib/db/test-database.ts" ||
         f === "lib/db/health.ts"
     );
@@ -1182,6 +1183,7 @@ describe("migration tooling stays out of the request path", () => {
       "lib/db/repositories/ledger.repository.ts",
       "lib/db/repositories/holds.repository.ts",
       "lib/db/repositories/rate-limits.repository.ts",
+      "lib/db/repositories/linked-accounts.repository.ts",
     ];
 
     const importers = Array.from(
@@ -1208,6 +1210,9 @@ describe("migration tooling stays out of the request path", () => {
     // equality still holds and a new arrival, script or not, has to be argued
     // for.
     expect(importers).toEqual([
+      "lib/migration/backfill.ts",
+      "lib/migration/verify.ts",
+      "lib/services/bank-linking.service.ts",
       "lib/services/rate-limit.service.ts",
       "lib/services/settlement.service.ts",
       "lib/services/transfers.service.ts",

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { NotFoundError } from "../repositories/errors";
 import { InfrastructureError, UnauthorizedError } from "../auth/errors";
+import { encryptCredential } from "../crypto/envelope";
 
 /**
  * OWNERSHIP ENFORCEMENT.
@@ -76,13 +77,35 @@ const ALICE_USER_DOC = {
   dwollaCustomerId: "dwolla-alice",
 };
 
+/**
+ * Stored credentials are CIPHERTEXT, bound to their record id and field.
+ *
+ * Reads no longer tolerate a plaintext value, so a fixture carrying a bare
+ * string is a document the datastore cannot produce and the repository
+ * correctly refuses it.
+ *
+ * The plaintext is deliberately not token-shaped. An earlier version used
+ * realistic `access-sandbox-…` strings; the crypto does not care about the
+ * shape, and a codebase where "it is only a fixture" excuses a token-shaped
+ * literal is one where a real token eventually lands the same way.
+ */
+const storedCredential = (
+  recordId: string,
+  field: "accessToken" | "fundingSourceUrl",
+  value: string
+) => encryptCredential(value, { recordId, field });
+
 const ALICE_BANK_DOC = {
   $id: "bank-doc-alice",
   userId: { $id: "user-doc-alice" },
   accountId: "plaid-account-alice",
   bankId: "plaid-item-alice",
-  accessToken: "access-sandbox-alice-token",
-  fundingSourceUrl: "https://api-sandbox.dwolla.com/funding-sources/funding-alice",
+  accessToken: storedCredential("bank-doc-alice", "accessToken", "provider-credential-alice"),
+  fundingSourceUrl: storedCredential(
+    "bank-doc-alice",
+    "fundingSourceUrl",
+    "https://funding.example.invalid/sources/alice"
+  ),
   shareableId: "cGxhaWQtYWNjb3VudC1hbGljZQ==",
 };
 
@@ -91,8 +114,12 @@ const BOB_BANK_DOC = {
   userId: { $id: "user-doc-bob" },
   accountId: "plaid-account-bob",
   bankId: "plaid-item-bob",
-  accessToken: "access-sandbox-bob-secret-token",
-  fundingSourceUrl: "https://api-sandbox.dwolla.com/funding-sources/funding-bob",
+  accessToken: storedCredential("bank-doc-bob", "accessToken", "provider-credential-bob"),
+  fundingSourceUrl: storedCredential(
+    "bank-doc-bob",
+    "fundingSourceUrl",
+    "https://funding.example.invalid/sources/bob"
+  ),
   shareableId: "cGxhaWQtYWNjb3VudC1ib2I=",
 };
 
@@ -176,6 +203,26 @@ describe("B. bank lists are actor scoped", () => {
     // BEFORE: getBanks({ userId }) accepted any user id.
     // AFTER: the only argument is the actor itself.
     expect(getOwnedBanks.length).toBe(1);
+  });
+
+  it("REFUSES a credential stored as plaintext", async () => {
+    // Reads used to tolerate an unencrypted value, for records written before
+    // the encryption migration. That tolerance is gone now that
+    // `npm run credentials:encrypt` reports every value encrypted, and this is
+    // what stops it drifting back: re-adding it is PERMISSIVE, so every
+    // encrypted fixture in this suite would keep passing and nothing else would
+    // notice.
+    //
+    // A plaintext credential at rest is now a fault, not a legacy shape. It is
+    // also indistinguishable from a value an attacker wrote directly into the
+    // document store, which is precisely the thing encryption at rest exists to
+    // make useless.
+    authenticateAlice([
+      { ...ALICE_BANK_DOC, accessToken: "provider-credential-in-the-clear" },
+    ]);
+    const actor = await requireActor();
+
+    await expect(getOwnedBanks(actor)).rejects.toThrow();
   });
 });
 

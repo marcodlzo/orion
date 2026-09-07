@@ -307,16 +307,11 @@ describe("enrolment does not weaken what was already proven", () => {
     expect(second.replayed).toBe(true);
     expect(second.status).toBe("submitted");
 
-    // NOT asserting that the two calls return the same transactionId. They do
-    // not: a fresh call returns the Appwrite transaction document id, a replay
-    // returns the PostgreSQL transfer id. That is a real inconsistency in the
-    // result DTO, and it is deliberately left alone here rather than pinned as
-    // correct — this suite is about enrolment, and asserting the current
-    // behaviour would make it harder to fix.
-    //
+    expect(second.transactionId).toBe(first.transactionId);
     // One transfer, one hold, ONE provider call — however many times it is sent.
     const { rows: transfers } = await query("SELECT id FROM transfers");
     expect(transfers).toHaveLength(1);
+    expect(first.transactionId).toBe(transfers[0].id);
     const { rows: holds } = await query("SELECT id FROM ledger_holds");
     expect(holds).toHaveLength(1);
     expect(stub.createDwollaTransfer).toHaveBeenCalledTimes(1);

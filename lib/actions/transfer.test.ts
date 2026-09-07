@@ -469,7 +469,7 @@ describe("J. the returned DTO", () => {
     const result = await initiateTransfer(VALID_INTENT);
 
     expect(result).toEqual({
-      transactionId: "tx-doc-1",
+      transactionId: "pg-transfer-1",
       status: "submitted",
       // A fresh submission, not a replay. The client has to be able to tell.
       replayed: false,
@@ -486,7 +486,7 @@ describe("J. the returned DTO", () => {
       "REDACTED-BOB-ACCESS-TOKEN",
       "dwolla-alice",
       "plaid-account-bob",
-      "transfer-1",
+      "https://api-sandbox.dwolla.invalid/transfers/transfer-1",
     ]) {
       expect(wire).not.toContain(forbidden);
     }

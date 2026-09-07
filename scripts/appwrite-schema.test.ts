@@ -230,9 +230,13 @@ describe("required attributes match what the application writes", () => {
   });
 
   it("writes every required banks attribute", () => {
+    // The call moved behind linkBankForActor, which writes the Appwrite bank
+    // AND mirrors it into PostgreSQL. The attribute list this test checks is
+    // still the object literal at this call site, so the scan follows the name
+    // rather than being relaxed.
     const written = writtenKeys(
       read("lib/actions/user.actions.ts"),
-      "createBankForActor("
+      "linkBankForActor("
     );
 
     expect(written.length).toBeGreaterThan(0);

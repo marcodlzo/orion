@@ -35,6 +35,7 @@ import {
   describeDwollaError,
 } from "../server/dwolla";
 import { plaidErrorCode } from "../plaid-sync/adapter";
+import { linkBankForActor } from "../services/bank-linking.service";
 import { requireActor, SESSION_COOKIE } from "../auth/actor";
 import { isUnauthenticated } from "../auth/errors";
 import {
@@ -243,7 +244,7 @@ export const createLinkToken = async () => {
         client_user_id: actor.userId
       },
       client_name: `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim() || 'Orion Banking',
-      products: ['auth'] as Products[],
+      products: ['auth', 'transactions'] as Products[],
       language: 'en',
       country_codes: ['US'] as CountryCode[],
     }
@@ -344,12 +345,19 @@ export const exchangePublicToken = async ({
           throw new Error("Failed to create a Dwolla funding source");
         }
 
-        await createBankForActor(actor, {
+        await linkBankForActor(actor, {
           bankId: itemId,
           accountId: accountData.account_id,
           accessToken,
           fundingSourceUrl,
           shareableId: encryptId(accountData.account_id),
+        }, {
+          displayName: accountData.name,
+          officialName: accountData.official_name,
+          mask: accountData.mask,
+          accountType: accountData.type,
+          accountSubtype: accountData.subtype,
+          currency: accountData.balances.iso_currency_code,
         });
 
         linked += 1;
