@@ -1,5 +1,7 @@
 # Dependency upgrade plan
 
+Status 2026-09-08: Tracks A-D are complete. See [implementation and validation results](dependency-upgrade-results.md). Track E remains a separate migration decision.
+
 Written 2026-09-07, after upgrading Next.js 14.2.3 to 14.2.35.
 
 Five tracks remain. They are independent and should land as separate commits.
