@@ -16,15 +16,15 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-// TablesDB, not node-appwrite's Databases. The installed SDK speaks the legacy
-// DocumentsDB API, whose routes now return 401 on this Appwrite Cloud whatever
-// scopes the key holds — verified route by route against the live project.
-// See scripts/appwrite-tablesdb.ts.
-import { TablesDbClient } from "./appwrite-tablesdb";
-
-const IndexType = { Unique: "unique", Key: "key" } as const;
-const RelationshipType = { ManyToOne: "manyToOne" } as const;
-const RelationMutate = { Restrict: "restrict" } as const;
+// Schema management uses the native TablesDB SDK. Runtime document reads keep
+// their existing repository boundary and ownership-scoped queries.
+import {
+  Client,
+  TablesDB,
+  TablesDBIndexType as IndexType,
+  RelationshipType,
+  RelationMutate,
+} from "node-appwrite";
 
 type StringAttributeSpec = {
   kind: "string";
@@ -186,6 +186,18 @@ type ExistingIndex = {
   attributes: string[];
 };
 
+// The schema contract uses the legacy vocabulary. Translate both list and
+// individual SDK responses before validation, including readiness polling.
+function normaliseColumn(column: unknown): ExistingAttribute {
+  const actual = column as ExistingAttribute & { relatedTable?: string };
+  return { ...actual, relatedCollection: actual.relatedTable ?? actual.relatedCollection };
+}
+
+function normaliseIndex(index: unknown): ExistingIndex {
+  const actual = index as ExistingIndex & { columns?: string[] };
+  return { ...actual, attributes: actual.columns ?? actual.attributes };
+}
+
 type ResolvedCollection = CollectionSpec & { id: string };
 
 type SchemaConfig = {
@@ -318,36 +330,36 @@ function safeError(error: unknown): string {
 }
 
 async function createAttribute(
-  databases: TablesDbClient,
+  databases: TablesDB,
   config: SchemaConfig,
   collection: ResolvedCollection,
   attribute: AttributeSpec
 ): Promise<void> {
   if (attribute.kind === "string") {
-    await databases.createStringAttribute(
-      config.databaseId,
-      collection.id,
-      attribute.key,
-      attribute.size,
-      attribute.required
-    );
+    await databases.createStringColumn({
+      databaseId: config.databaseId,
+      tableId: collection.id,
+      key: attribute.key,
+      size: attribute.size,
+      required: attribute.required,
+    });
     return;
   }
 
   const userCollectionId = config.collections.find(({ name }) => name === "users")!.id;
-  await databases.createRelationshipAttribute(
-    config.databaseId,
-    collection.id,
-    userCollectionId,
-    RelationshipType.ManyToOne,
-    false,
-    attribute.key,
-    RelationMutate.Restrict
-  );
+  await databases.createRelationshipColumn({
+    databaseId: config.databaseId,
+    tableId: collection.id,
+    relatedTableId: userCollectionId,
+    type: RelationshipType.ManyToOne,
+    twoWay: false,
+    key: attribute.key,
+    onDelete: RelationMutate.Restrict,
+  });
 }
 
 async function ensureAttribute(
-  databases: TablesDbClient,
+  databases: TablesDB,
   config: SchemaConfig,
   collection: ResolvedCollection,
   attribute: AttributeSpec,
@@ -374,24 +386,24 @@ async function ensureAttribute(
       // conflict is safe to re-read; every other provider error stays fatal.
       if (asAppwriteError(error).code !== 409) throw error;
     }
-    actual = await waitUntilAvailable(
+    actual = await waitUntilAvailable<ExistingAttribute>(
       () =>
-        databases.getAttribute(
-          config.databaseId,
-          collection.id,
-          attribute.key
-        ) as Promise<ExistingAttribute>,
+        databases.getColumn({
+          databaseId: config.databaseId,
+          tableId: collection.id,
+          key: attribute.key,
+        }).then(normaliseColumn),
       `Attribute ${label}`
     );
     summary.createdAttributes += 1;
   } else if (actual.status !== "available") {
-    actual = await waitUntilAvailable(
+    actual = await waitUntilAvailable<ExistingAttribute>(
       () =>
-        databases.getAttribute(
-          config.databaseId,
-          collection.id,
-          attribute.key
-        ) as Promise<ExistingAttribute>,
+        databases.getColumn({
+          databaseId: config.databaseId,
+          tableId: collection.id,
+          key: attribute.key,
+        }).then(normaliseColumn),
       `Attribute ${label}`
     );
   }
@@ -406,7 +418,7 @@ async function ensureAttribute(
 }
 
 async function ensureIndex(
-  databases: TablesDbClient,
+  databases: TablesDB,
   config: SchemaConfig,
   collection: ResolvedCollection,
   index: IndexSpec,
@@ -426,34 +438,34 @@ async function ensureIndex(
 
     console.log(`  CREATE  index     ${label}`);
     try {
-      await databases.createIndex(
-        config.databaseId,
-        collection.id,
-        index.key,
-        index.type,
-        [...index.attributes]
-      );
+      await databases.createIndex({
+        databaseId: config.databaseId,
+        tableId: collection.id,
+        key: index.key,
+        type: index.type === "unique" ? IndexType.Unique : IndexType.Key,
+        columns: [...index.attributes],
+      });
     } catch (error) {
       if (asAppwriteError(error).code !== 409) throw error;
     }
-    actual = await waitUntilAvailable(
+    actual = await waitUntilAvailable<ExistingIndex>(
       () =>
-        databases.getIndex(
-          config.databaseId,
-          collection.id,
-          index.key
-        ) as Promise<ExistingIndex>,
+        databases.getIndex({
+          databaseId: config.databaseId,
+          tableId: collection.id,
+          key: index.key,
+        }).then(normaliseIndex),
       `Index ${label}`
     );
     summary.createdIndexes += 1;
   } else if (actual.status !== "available") {
-    actual = await waitUntilAvailable(
+    actual = await waitUntilAvailable<ExistingIndex>(
       () =>
-        databases.getIndex(
-          config.databaseId,
-          collection.id,
-          index.key
-        ) as Promise<ExistingIndex>,
+        databases.getIndex({
+          databaseId: config.databaseId,
+          tableId: collection.id,
+          key: index.key,
+        }).then(normaliseIndex),
       `Index ${label}`
     );
   }
@@ -469,11 +481,10 @@ async function ensureIndex(
 
 export async function synchronizeSchema(options: { apply: boolean }): Promise<Summary> {
   const config = resolveSchemaConfig();
-  const databases = new TablesDbClient({
-    endpoint: config.endpoint,
-    projectId: config.projectId,
-    apiKey: config.apiKey,
-  });
+  const databases = new TablesDB(new Client()
+    .setEndpoint(config.endpoint)
+    .setProject(config.projectId)
+    .setKey(config.apiKey));
   const summary: Summary = {
     createdAttributes: 0,
     createdIndexes: 0,
@@ -486,17 +497,17 @@ export async function synchronizeSchema(options: { apply: boolean }): Promise<Su
   for (const collection of config.collections) {
     console.log(`\n${collection.name}`);
     const [attributeList, indexList] = await Promise.all([
-      databases.listAttributes(config.databaseId, collection.id),
-      databases.listIndexes(config.databaseId, collection.id),
+      databases.listColumns({ databaseId: config.databaseId, tableId: collection.id }),
+      databases.listIndexes({ databaseId: config.databaseId, tableId: collection.id }),
     ]);
     const attributes = new Map(
-      (attributeList.attributes as unknown as ExistingAttribute[]).map((attribute) => [
+      attributeList.columns.map(normaliseColumn).map((attribute) => [
         attribute.key,
         attribute,
       ])
     );
     const indexes = new Map(
-      (indexList.indexes as unknown as ExistingIndex[]).map((index) => [
+      indexList.indexes.map(normaliseIndex).map((index) => [
         index.key,
         index,
       ])
