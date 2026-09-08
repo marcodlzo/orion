@@ -89,10 +89,26 @@ They are real, and this application should not be exposed to untrusted users.
 | Finding | Severity | Milestone |
 |---|---|---|
 | Nothing credits a customer's ledger account, so the solvency check is an exposure cap rather than a balance check | Medium | unscheduled |
-| No end-to-end tests; the server-owned transfer flow is not driven end to end | Medium | unscheduled |
 | `shareableId` is base64 encoding presented as encryption | Medium | unscheduled |
 
-Three rows read **unscheduled**, and that is a correction rather than a
+END-TO-END TESTS HAVE LEFT THIS TABLE. Six Playwright tests drive a real
+browser against real Appwrite, the Plaid Link sandbox, the Dwolla sandbox and
+PostgreSQL, with no action, provider, auth or ledger mocks. They assert database
+state rather than page text: one durable transfer with one hold and a persisted
+provider reference, and a replay of the browser's exact request producing no
+second financial effect.
+
+They found two defects nothing else had. Every label on the sign-up form pointed
+at the first input, because CustomInput omitted the wrapper that generates the
+id — the form was unusable by keyboard and screen reader. And the Connect bank
+button rendered in the sidebar was never gated on Plaid readiness, so an early
+click was silently ignored.
+
+THEY DO NOT RUN ON EVERY COMMIT. The workflow is manual dispatch, because it
+needs sandbox credentials and creates provider-side records. A suite nothing
+runs is a suite that rots, so this is a real gap rather than a finished job.
+
+Two rows read **unscheduled**, and that is a correction rather than a
 demotion: rate limiting and `shareableId` were tagged to Milestone 2, which
 closed without them. A finding pointing at a completed milestone is how work
 quietly disappears, so they are named as unowned until something claims them.
