@@ -92,6 +92,13 @@ async function seedTransfer(customerId: string, amountMinor: number) {
     requestFingerprint: `fp-${randomUUID()}`,
     amountMinor,
     currency: "USD",
+    recipientUserDocumentId: "userdoc-recipient",
+    senderBankDocumentId: "bank-doc-sender",
+    recipientBankDocumentId: "bank-doc-recipient",
+    note: "test transfer",
+    // NULL keeps these on the HOUSE model, which is the shape their
+    // entry assertions describe. The two-party model has its own tests.
+    recipientCustomerId: null,
   });
   return claim.row.id;
 }

@@ -41,12 +41,24 @@ async function seedCustomer(n = 1): Promise<string> {
   return row.id;
 }
 
-const claim = (customerId: string, over: Partial<Parameters<typeof claimTransfer>[0]> = {}) => ({
+const claim = (
+  customerId: string,
+  over: Partial<Parameters<typeof claimTransfer>[0]> = {}
+): Parameters<typeof claimTransfer>[0] => ({
   customerId,
   idempotencyKey: "11111111-1111-4111-8111-111111111111",
   requestFingerprint: "fp-abc",
   amountMinor: 10_00,
   currency: "USD",
+  // The parties are recorded WITH the claim, so a fixture without them
+  // describes a row the application cannot produce.
+  recipientUserDocumentId: "userdoc-recipient",
+  senderBankDocumentId: "bank-doc-sender",
+  recipientBankDocumentId: "bank-doc-recipient",
+  note: "test transfer",
+  // NULL keeps these on the HOUSE model, which is the shape their
+  // entry assertions describe. The two-party model has its own tests.
+  recipientCustomerId: null,
   ...over,
 });
 

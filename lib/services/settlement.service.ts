@@ -199,17 +199,40 @@ export async function handleDwollaWebhook(
       // reservation and the movement can never disagree.
       await captureHold(updated.id, client);
 
-      const customer = await ensureCustomerAccount(updated.customer_id, client);
-      const settlement = await ensureSettlementAccount(client);
+      const sender = await ensureCustomerAccount(updated.customer_id, client);
       const amountMinor = Number(updated.amount_minor);
+
+      // WHO GETS THE CREDIT. See docs/adr/0002-cutover-accounting-model.md.
+      //
+      // `internal_two_party` credits the RECIPIENT, because that is where the
+      // money went. The house account previously took every credit, so a
+      // recipient's ledger balance never reflected anything received — the
+      // interface showed it from the Appwrite record instead, and PostgreSQL
+      // could not have become the system of record while that was true.
+      //
+      // `house` remains for transfers whose recipient could not be resolved,
+      // and for everything settled before this change. Entries are immutable by
+      // trigger, so those keep the shape they were given; the column records
+      // which shape to expect rather than the ledger becoming unreadable.
+      //
+      // A SELF-TRANSFER NETS TO ZERO AND MUST. There is one customer account
+      // per currency, not one per linked bank, so moving money between two
+      // banks the same customer owns posts -amount and +amount to the SAME
+      // account. That is the truth: their aggregate internal position did not
+      // change. Skipping the posting would lose the record; posting a credit
+      // elsewhere would fabricate income.
+      const creditAccount =
+        updated.accounting_model === "internal_two_party" && updated.recipient_customer_id
+          ? await ensureCustomerAccount(updated.recipient_customer_id, client)
+          : await ensureSettlementAccount(client);
 
       await postTransaction(
         {
           description: `transfer ${updated.id} settled`,
           transferId: updated.id,
           lines: [
-            { accountId: customer.id, amountMinor: -amountMinor },
-            { accountId: settlement.id, amountMinor },
+            { accountId: sender.id, amountMinor: -amountMinor },
+            { accountId: creditAccount.id, amountMinor },
           ],
         },
         client

@@ -29,7 +29,10 @@ import { isPositive, tryParseUsd, type Money } from "../domain/money";
 // THE ONE PERMITTED CROSSING from a request path into lib/db. The
 // import-boundary suite names this file explicitly; a second crossing is a
 // milestone decision, not a refactor.
-import { ensureBankingCustomer } from "../db/repositories/banking-customers.repository";
+import {
+  ensureBankingCustomer,
+  findCustomerByUserDocumentId,
+} from "../db/repositories/banking-customers.repository";
 import {
   claimTransfer,
   markFailed,
@@ -301,6 +304,32 @@ export async function executeTransfer(
         }),
         amountMinor: intent.amount.amountMinor,
         currency: intent.amount.currency,
+        // THE PARTIES, RECORDED BEFORE THE PROVIDER IS CALLED.
+        //
+        // Every one is server-resolved. The recipient's user document comes
+        // from the bank record the reference resolved to, after that lookup
+        // happened internally — the caller supplied an opaque reference and
+        // nothing else. The sender's bank was proven owned by the actor.
+        //
+        // Durable at claim time for the same reason the key is: a process that
+        // dies after Dwolla accepts must leave behind enough to say who the
+        // money was for. Reconstructing a counterparty afterwards is guessing.
+        recipientUserDocumentId: relatedUserId(recipientBank.userId),
+        // Resolved, never enrolled from here. Enrolment needs the two
+        // identifiers a VERIFIED SESSION carries, and this is not the
+        // recipient's session — creating their bridge row from a bank
+        // relationship would be enrolling somebody who has not acted.
+        //
+        // In practice they are already enrolled, because linking a bank enrols.
+        // When they are not, the transfer still completes and posts against the
+        // house account, which is the honest record of "we do not know who to
+        // credit" rather than a refusal to move money the sender authorised.
+        recipientCustomerId: (
+          await findCustomerByUserDocumentId(relatedUserId(recipientBank.userId), client)
+        )?.id ?? null,
+        senderBankDocumentId: sourceBank.$id,
+        recipientBankDocumentId: recipientBank.$id,
+        note: intent.note,
       },
       client
     );

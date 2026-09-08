@@ -30,7 +30,9 @@
     "appwrite:schema:apply": "node --env-file-if-exists=.env.local --import tsx scripts/appwrite-schema.ts --apply",
     "rate-limit:sweep": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/rate-limit-sweep.ts",
     "e2e:cleanup": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/e2e-cleanup.ts",
-    "e2e:cleanup:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/e2e-cleanup.ts --commit"
+    "e2e:cleanup:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/e2e-cleanup.ts --commit",
+    "funding:opening": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/opening-allocation.ts",
+    "funding:opening:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/opening-allocation.ts --commit"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",

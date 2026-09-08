@@ -1210,14 +1210,39 @@ describe("migration tooling stays out of the request path", () => {
     // equality still holds and a new arrival, script or not, has to be argued
     // for.
     expect(importers).toEqual([
+      // OPERATOR TOOLING, not a crossing. It is the only code in the system
+      // that CREATES money — an opening allocation credited against equity —
+      // and it runs from a terminal with no actor. The test below asserts no
+      // request path can reach it.
+      "lib/funding/opening-allocation.ts",
       "lib/migration/backfill.ts",
       "lib/migration/verify.ts",
       "lib/services/bank-linking.service.ts",
       "lib/services/rate-limit.service.ts",
       "lib/services/settlement.service.ts",
       "lib/services/transfers.service.ts",
+      "scripts/opening-allocation.ts",
       "scripts/rate-limit-sweep.ts",
     ]);
+  });
+
+  it("nothing that creates money is reachable from a request path", () => {
+    // `lib/funding/` posts a ledger credit with no matching customer debit —
+    // it is the only place money enters the system. Every other module moves
+    // money that already exists.
+    //
+    // A request path reaching it would turn "credit an opening balance" into
+    // something a caller could trigger, and the uniqueness guard on the source
+    // reference is the only thing that would stand between that and minting.
+    const requestEntries = Array.from(graph.values())
+      .filter((m) => m.isAction || m.isClient || m.file.startsWith("app/"))
+      .map((m) => m.file);
+
+    const reachable = Array.from(closure(requestEntries)).filter((f) =>
+      f.startsWith("lib/funding/")
+    );
+
+    expect(reachable).toEqual([]);
   });
 
   it("no script is reachable from a request path", () => {

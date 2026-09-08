@@ -78,6 +78,13 @@ async function submittedTransfer(
     requestFingerprint: `fp-${providerTransferId}`,
     amountMinor,
     currency: "USD",
+    recipientUserDocumentId: "userdoc-recipient",
+    senderBankDocumentId: "bank-doc-sender",
+    recipientBankDocumentId: "bank-doc-recipient",
+    note: "test transfer",
+    // NULL keeps these on the HOUSE model, which is the shape their
+    // entry assertions describe. The two-party model has its own tests.
+    recipientCustomerId: null,
   });
 
   // The real orchestration reserves the funds before calling the provider, so a
@@ -384,6 +391,13 @@ describe("events this system cannot act on", () => {
       requestFingerprint: "fp-req",
       amountMinor: 10_00,
       currency: "USD",
+      recipientUserDocumentId: "userdoc-recipient",
+      senderBankDocumentId: "bank-doc-sender",
+      recipientBankDocumentId: "bank-doc-recipient",
+      note: "test transfer",
+      // NULL keeps these on the HOUSE model, which is the shape their
+      // entry assertions describe. The two-party model has its own tests.
+      recipientCustomerId: null,
     });
 
     // Give it a provider reference WITHOUT advancing the state, which is the

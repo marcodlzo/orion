@@ -23,7 +23,18 @@ export type LedgerAccountRow = {
   updated_at: Date;
 };
 
-export type LedgerTransactionKind = "settlement" | "reversal";
+export type LedgerTransactionKind =
+  | "settlement"
+  | "reversal"
+  /**
+   * Seeded opening funds, booked against an equity account.
+   *
+   * NEVER provider-confirmed money. It carries a source reference so a repeat
+   * cannot post twice, and it is distinguishable from real funding by this kind
+   * alone — which matters, because "how did this customer come to have money"
+   * is the question a reconciler and an auditor both ask first.
+   */
+  | "opening_allocation";
 
 export type LedgerTransactionRow = {
   id: string;
@@ -93,6 +104,36 @@ export async function ensureSettlementAccount(
 }
 
 /**
+ * The equity account an opening allocation is booked against.
+ *
+ * Deliberately NOT the settlement account. Settlement represents money in
+ * flight to and from the provider, and mixing seeded capital into it would make
+ * that balance meaningless for reconciliation — the one number whose job is to
+ * say how much is genuinely moving.
+ */
+export async function ensureOpeningEquityAccount(
+  client?: PoolClient
+): Promise<LedgerAccountRow> {
+  const { rows } = await run<LedgerAccountRow>(
+    client,
+    `INSERT INTO ledger_accounts (customer_id, kind, currency, credit_limit_minor)
+     VALUES (NULL, 'opening_equity', 'USD', 0)
+     ON CONFLICT (currency) WHERE kind = 'opening_equity' DO NOTHING
+     RETURNING *`,
+    []
+  );
+  if (rows[0]) return rows[0];
+
+  const existing = await run<LedgerAccountRow>(
+    client,
+    "SELECT * FROM ledger_accounts WHERE kind = 'opening_equity' AND currency = 'USD'",
+    []
+  );
+  if (!existing.rows[0]) throw new Error("opening equity account is missing");
+  return existing.rows[0];
+}
+
+/**
  * The customer's own account, created on first use.
  *
  * The conflict path deliberately does NOT rewrite `credit_limit_minor`. An
@@ -137,20 +178,28 @@ export async function postTransaction(
     /** Defaults to a settlement. A reversal must name what it reverses. */
     kind?: LedgerTransactionKind;
     reversesTransactionId?: string | null;
+    /**
+     * Where this money came from, and what makes the posting repeat-proof.
+     *
+     * A unique index decides, not this code: a second posting with the same
+     * reference violates it rather than quietly double-crediting somebody.
+     */
+    sourceReference?: string | null;
   },
   client: PoolClient
 ): Promise<{ transactionId: string; entries: LedgerEntryRow[] }> {
   const { rows: txnRows } = await run<{ id: string }>(
     client,
     `INSERT INTO ledger_transactions
-       (transfer_id, description, kind, reverses_transaction_id)
-     VALUES ($1, $2, $3, $4)
+       (transfer_id, description, kind, reverses_transaction_id, source_reference)
+     VALUES ($1, $2, $3, $4, $5)
      RETURNING id`,
     [
       input.transferId ?? null,
       input.description,
       input.kind ?? "settlement",
       input.reversesTransactionId ?? null,
+      input.sourceReference ?? null,
     ]
   );
   const transactionId = txnRows[0].id;

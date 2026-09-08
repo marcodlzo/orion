@@ -52,6 +52,14 @@ export type TransferRow = {
   reversed_at: Date | null;
   created_at: Date;
   updated_at: Date;
+  /** The counterparty, resolved server-side. Null on rows predating parties. */
+  recipient_user_document_id: string | null;
+  recipient_customer_id: string | null;
+  sender_bank_document_id: string | null;
+  recipient_bank_document_id: string | null;
+  note: string | null;
+  /** Which shape this transfer's ledger entries take. See the migration. */
+  accounting_model: "house" | "internal_two_party";
 };
 
 export type TransferClaim = {
@@ -60,6 +68,32 @@ export type TransferClaim = {
   requestFingerprint: string;
   amountMinor: number;
   currency: string;
+  /**
+   * The parties and accounts, recorded WITH the claim.
+   *
+   * Durable before the provider is called, for the same reason the key is: a
+   * process that dies after Dwolla accepts must leave behind enough to say who
+   * the money was for. Reconstructing a counterparty afterwards would mean
+   * guessing.
+   *
+   * All server-resolved. `recipientUserDocumentId` comes from the bank the
+   * reference named, after that bank was looked up internally — never from
+   * anything the caller sent.
+   */
+  recipientUserDocumentId: string;
+  senderBankDocumentId: string;
+  recipientBankDocumentId: string;
+  note: string;
+  /**
+   * The recipient's local customer, when they already have one.
+   *
+   * NULL when the recipient has never been enrolled — which is possible for a
+   * user who linked a bank before linking began enrolling. It decides the
+   * accounting model, because a transfer cannot credit a customer that does not
+   * exist, and labelling it `internal_two_party` anyway would make the
+   * provenance column lie about the entries it describes.
+   */
+  recipientCustomerId: string | null;
 };
 
 /**
@@ -146,9 +180,16 @@ export async function claimTransfer(
     client,
     `INSERT INTO transfers (
        customer_id, idempotency_key, request_fingerprint,
-       state, amount_minor, currency
+       state, amount_minor, currency,
+       recipient_user_document_id, sender_bank_document_id,
+       recipient_bank_document_id, note, recipient_customer_id, accounting_model
      )
-     VALUES ($1, $2, $3, 'requested', $4, $5)
+     VALUES (
+       $1, $2, $3, 'requested', $4, $5, $6, $7, $8, $9, $10,
+       -- The model is DERIVED, never asserted. A transfer with no resolvable
+       -- recipient falls back to the house posting and says so.
+       CASE WHEN $10::uuid IS NULL THEN 'house' ELSE 'internal_two_party' END
+     )
      ON CONFLICT (customer_id, idempotency_key) DO NOTHING
      RETURNING *`,
     [
@@ -157,6 +198,13 @@ export async function claimTransfer(
       input.requestFingerprint,
       String(input.amountMinor),
       input.currency,
+      input.recipientUserDocumentId,
+      input.senderBankDocumentId,
+      input.recipientBankDocumentId,
+      // Empty means the sender typed nothing, which is different from unknown.
+      // NULL is reserved for rows written before parties existed.
+      input.note,
+      input.recipientCustomerId,
     ]
   );
 

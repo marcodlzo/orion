@@ -75,6 +75,13 @@ async function settledTransfer(amountMinor = 100_00) {
     requestFingerprint: `fp-${randomUUID()}`,
     amountMinor,
     currency: "USD",
+    recipientUserDocumentId: "userdoc-recipient",
+    senderBankDocumentId: "bank-doc-sender",
+    recipientBankDocumentId: "bank-doc-recipient",
+    note: "test transfer",
+    // NULL keeps these on the HOUSE model, which is the shape their
+    // entry assertions describe. The two-party model has its own tests.
+    recipientCustomerId: null,
   });
   const transferId = claim.row.id;
 
@@ -311,6 +318,13 @@ describe("the reversed transfer state", () => {
       requestFingerprint: "fp-unsettled",
       amountMinor: 10_00,
       currency: "USD",
+      recipientUserDocumentId: "userdoc-recipient",
+      senderBankDocumentId: "bank-doc-sender",
+      recipientBankDocumentId: "bank-doc-recipient",
+      note: "test transfer",
+      // NULL keeps these on the HOUSE model, which is the shape their
+      // entry assertions describe. The two-party model has its own tests.
+      recipientCustomerId: null,
     });
     await markSubmitted({
       transferId: claim.row.id,
