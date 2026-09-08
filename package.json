@@ -20,6 +20,7 @@
     "db:backfill": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-backfill.ts",
     "db:backfill:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-backfill.ts --commit",
     "db:verify": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-verify.ts",
+    "db:cutover:preflight": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/cutover-preflight.ts",
     "db:reconcile": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/db-reconcile.ts",
     "plaid:sync": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/plaid-sync.ts",
     "credentials:check": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/check-credential-keys.ts",
@@ -27,7 +28,9 @@
     "credentials:encrypt:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/encrypt-credentials.ts --commit",
     "appwrite:schema": "node --env-file-if-exists=.env.local --import tsx scripts/appwrite-schema.ts",
     "appwrite:schema:apply": "node --env-file-if-exists=.env.local --import tsx scripts/appwrite-schema.ts --apply",
-    "rate-limit:sweep": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/rate-limit-sweep.ts"
+    "rate-limit:sweep": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/rate-limit-sweep.ts",
+    "e2e:cleanup": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/e2e-cleanup.ts",
+    "e2e:cleanup:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/e2e-cleanup.ts --commit"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",

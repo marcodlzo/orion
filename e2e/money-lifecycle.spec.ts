@@ -2,7 +2,7 @@ import { test, expect, type BrowserContext, type Page, type Request } from "@pla
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { Pool } from "pg";
-import { Client, Databases, Query } from "node-appwrite";
+import { Client, Databases, Query, Users } from "node-appwrite";
 
 // Real browser, Appwrite, Plaid Link sandbox, Dwolla sandbox, and PostgreSQL.
 // No action, provider, authentication, or ledger mocks.
@@ -10,10 +10,12 @@ test.describe.configure({ mode: "serial" });
 const email = `orion-e2e-${randomUUID()}@example.com`;
 const password = `Orion-${randomUUID()}!`;
 const pool = new Pool({ connectionString: process.env.ORION_E2E_DATABASE_URL });
-const database = new Databases(new Client()
+const appwrite = new Client()
   .setEndpoint(process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!)
   .setProject(process.env.NEXT_PUBLIC_APPWRITE_PROJECT!)
-  .setKey(process.env.NEXT_APPWRITE_KEY!));
+  .setKey(process.env.NEXT_APPWRITE_KEY!);
+const database = new Databases(appwrite);
+const userService = new Users(appwrite);
 let context: BrowserContext;
 let page: Page;
 let userDocumentId: string;
@@ -31,7 +33,55 @@ test.beforeAll(async ({ browser }) => {
   page = await context.newPage();
   page.on("pageerror", error => errors.push(error.name));
 });
-test.afterAll(async () => { await context?.close(); await pool.end(); });
+/**
+ * REMOVE WHAT THIS RUN CREATED IN APPWRITE.
+ *
+ * PostgreSQL is isolated — the suite runs against TEST_DATABASE_URL — but sign-up
+ * goes through the real application, so the user, its banks and its transactions
+ * land in the SAME Appwrite project as production data.
+ *
+ * Without this, every run left residue, and `npm run db:backfill` reads every
+ * user and every bank. Nine runs put nine test customers and six linked accounts
+ * into what the migration would have carried into the real database.
+ *
+ * Never fails the run. A cleanup error must not turn a passing suite red, and
+ * `npm run e2e:cleanup` sweeps whatever is left behind.
+ *
+ * Dwolla customers and Plaid Items from this run are NOT removed. Dwolla
+ * customers cannot be deleted, only deactivated. Provider accumulation is
+ * inherent to testing against a real sandbox; the proper fix for all of it is a
+ * separate Appwrite project and sandbox tenant for end-to-end runs.
+ */
+test.afterAll(async () => {
+  await context?.close();
+  try {
+    if (userDocumentId) {
+      for (const bank of await ownedBanks()) {
+        await database.deleteDocument({
+          databaseId: process.env.APPWRITE_DATABASE_ID!,
+          collectionId: process.env.APPWRITE_BANK_COLLECTION_ID!,
+          documentId: bank.$id,
+        });
+      }
+      const user = await database.getDocument({
+        databaseId: process.env.APPWRITE_DATABASE_ID!,
+        collectionId: process.env.APPWRITE_USER_COLLECTION_ID!,
+        documentId: userDocumentId,
+      });
+      await database.deleteDocument({
+        databaseId: process.env.APPWRITE_DATABASE_ID!,
+        collectionId: process.env.APPWRITE_USER_COLLECTION_ID!,
+        documentId: userDocumentId,
+      });
+      const authId = (user as unknown as { userId?: string }).userId;
+      if (authId) await userService.delete({ userId: authId });
+    }
+  } catch {
+    // Names only, and never fatal.
+    console.warn("e2e cleanup left residue; run npm run e2e:cleanup");
+  }
+  await pool.end();
+});
 
 async function ownedBanks() {
   const result = await database.listDocuments({ databaseId: process.env.APPWRITE_DATABASE_ID!,

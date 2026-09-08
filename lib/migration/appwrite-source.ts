@@ -26,12 +26,20 @@ import { Query } from "node-appwrite";
 import { createAdminClient } from "../appwrite";
 import { decryptCredential, isEncrypted } from "../crypto/envelope";
 import { InfrastructureError } from "../auth/errors";
+import type { LegacyTransfer } from "./transfer-history-plan";
 
 const {
   APPWRITE_DATABASE_ID: DATABASE_ID,
   APPWRITE_USER_COLLECTION_ID: USER_COLLECTION_ID,
   APPWRITE_BANK_COLLECTION_ID: BANK_COLLECTION_ID,
+  APPWRITE_TRANSACTION_COLLECTION_ID: TRANSACTION_COLLECTION_ID,
 } = process.env;
+
+/** Operator-only, complete scan for the history cutover preflight. */
+export function readAllLegacyTransfers(): Promise<SourceScan<LegacyTransfer>> {
+  if (!TRANSACTION_COLLECTION_ID) throw new Error("APPWRITE_TRANSACTION_COLLECTION_ID is required");
+  return readAll<LegacyTransfer>(TRANSACTION_COLLECTION_ID, "transaction");
+}
 
 /**
  * Appwrite's maximum page size.
