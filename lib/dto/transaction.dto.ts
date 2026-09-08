@@ -1,3 +1,4 @@
+import { readMoneyMinor } from "../db/pool";
 import type { PlaidTransactionRow } from "../db/repositories/plaid-items.repository";
 
 /**
@@ -154,4 +155,82 @@ function legacyAmountToMinor(value: unknown): number {
   if (!Number.isSafeInteger(minor)) return 0;
 
   return sign ? -minor : minor;
+}
+
+/**
+ * A transfer row from PostgreSQL, as history.
+ *
+ * Replaces `toTransactionDTOFromRecord`, which read the Appwrite transaction
+ * collection. Both exist while the cutover verifies they agree; the Appwrite one
+ * goes when the dual write does.
+ *
+ * DIRECTION IS A COMPARISON, NOT AN INFERENCE. The viewing bank is either the
+ * sender or the recipient, and the row says which. The original code read the
+ * first character of a formatted string, which broke the moment the formatter
+ * changed.
+ *
+ * STATUS COMES FROM THE STATE MACHINE. Never from a clock. `requested` maps to
+ * `pending` because that is what it is — claimed, with the provider call not yet
+ * confirmed. Calling it `submitted` would assert something reached Dwolla that
+ * may not have.
+ */
+export function toTransactionDTOFromTransfer(
+  row: {
+    id: string;
+    state: string;
+    amount_minor: string;
+    note: string | null;
+    sender_bank_document_id: string | null;
+    recipient_bank_document_id: string | null;
+    created_at: Date;
+  },
+  viewingBankDocumentId: string
+): TransactionDTO {
+  const direction: "debit" | "credit" =
+    row.sender_bank_document_id === viewingBankDocumentId ? "debit" : "credit";
+
+  return {
+    id: row.id,
+    // An empty note means the sender typed nothing. NULL means a row written
+    // before the column existed. Both render as the same fallback, but only one
+    // of them is a gap in the data.
+    name: row.note && row.note.trim() ? row.note : "Transfer",
+    date: row.created_at.toISOString(),
+    // Exact integer minor units. `readMoneyMinor` refuses anything else rather
+    // than coercing, which is what keeps a BIGINT from silently becoming a
+    // float on the way to the screen.
+    amountMinor: readMoneyMinor(row.amount_minor),
+    direction,
+    status: transferStateToStatus(row.state),
+    // The legacy collection carried these; a transfer has no equivalent, and
+    // inventing a category would be worse than an honest constant.
+    paymentChannel: "online",
+    category: "Transfer",
+  };
+}
+
+/**
+ * The state machine's vocabulary, mapped to what the table renders.
+ *
+ * Exhaustive on purpose. An unrecognised state is a new transfer state somebody
+ * added without deciding how it should look, and showing it as `pending` is the
+ * honest default: it says "in progress, not confirmed" rather than claiming an
+ * outcome.
+ */
+function transferStateToStatus(state: string): TransactionStatus {
+  switch (state) {
+    case "settled":
+      return "settled";
+    case "failed":
+      return "failed";
+    case "returned":
+      return "returned";
+    case "reversed":
+      return "reversed";
+    case "submitted":
+      return "submitted";
+    case "requested":
+    default:
+      return "pending";
+  }
 }

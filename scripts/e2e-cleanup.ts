@@ -25,6 +25,7 @@
 import { createAdminClient } from "../lib/appwrite";
 import {
   readAllLegacyBanks,
+  readAllLegacyTransfers,
   readAllLegacyUsers,
 } from "../lib/migration/appwrite-source";
 
@@ -32,6 +33,7 @@ const {
   APPWRITE_DATABASE_ID: DATABASE_ID,
   APPWRITE_USER_COLLECTION_ID: USER_COLLECTION_ID,
   APPWRITE_BANK_COLLECTION_ID: BANK_COLLECTION_ID,
+  APPWRITE_TRANSACTION_COLLECTION_ID: TRANSACTION_COLLECTION_ID,
 } = process.env;
 
 /**
@@ -83,6 +85,29 @@ async function main(): Promise<number> {
     disposableIds.has(ownerDocumentId(b as unknown as Record<string, unknown>))
   );
 
+  // ORPHANED TRANSACTION DOCUMENTS.
+  //
+  // The first version of this tool deleted users and banks and left these
+  // behind, so a run's transaction records survived the user that made them.
+  // They are not merely untidy: the history backfill reads this collection, and
+  // an orphan is a record it cannot attribute to anybody.
+  //
+  // Identified by their PARTIES rather than by an email prefix, because a
+  // transaction carries no email. A record naming a user document that no
+  // longer exists is unattributable whatever created it.
+  const liveUserIds = new Set(
+    users.documents.filter((u) => !disposableIds.has(u.$id)).map((u) => u.$id)
+  );
+  const transfers = TRANSACTION_COLLECTION_ID
+    ? (await readAllLegacyTransfers()).documents
+    : [];
+  const orphanedTransfers = transfers.filter((t) => {
+    const r = t as unknown as Record<string, unknown>;
+    const sender = String(r.senderId ?? "");
+    const receiver = String(r.receiverId ?? "");
+    return !liveUserIds.has(sender) || !liveUserIds.has(receiver);
+  });
+
   console.log(
     [
       "────────────────────────────────────────────────────────────────",
@@ -92,6 +117,7 @@ async function main(): Promise<number> {
       `banks scanned        ${banks.documents.length}`,
       `test users           ${disposable.length}`,
       `test bank documents  ${disposableBanks.length}`,
+      `orphaned transactions ${orphanedTransfers.length}`,
       `retained users       ${users.documents.length - disposable.length}`,
       "",
     ].join("\n")
@@ -119,12 +145,26 @@ async function main(): Promise<number> {
   }
 
   const { database, user: userService } = await createAdminClient();
+  let transfersDeleted = 0;
   let banksDeleted = 0;
   let usersDeleted = 0;
   let authDeleted = 0;
   let failed = 0;
 
-  // Banks first: the user document is the relationship target, so removing it
+  // Transactions first: they name users and banks, so removing them last would
+  // mean deleting the things they point at while they still point at them.
+  for (const transfer of orphanedTransfers) {
+    if (!TRANSACTION_COLLECTION_ID) break;
+    try {
+      await database.deleteDocument(DATABASE_ID, TRANSACTION_COLLECTION_ID, transfer.$id);
+      transfersDeleted += 1;
+    } catch {
+      console.error(`  failed to delete transaction ${transfer.$id}`);
+      failed += 1;
+    }
+  }
+
+  // Banks next: the user document is the relationship target, so removing it
   // while a bank still points at it leaves a dangling reference.
   for (const bank of disposableBanks) {
     try {
@@ -161,6 +201,7 @@ async function main(): Promise<number> {
   console.log(
     [
       "",
+      `transactions deleted    ${transfersDeleted}`,
       `bank documents deleted  ${banksDeleted}`,
       `user documents deleted  ${usersDeleted}`,
       `auth accounts deleted   ${authDeleted}`,

@@ -56,6 +56,24 @@ test.afterAll(async () => {
   await context?.close();
   try {
     if (userDocumentId) {
+      // Transactions first. They name the user and the banks, so deleting
+      // those while a transaction still points at them leaves an ORPHAN — a
+      // record the history backfill reads and cannot attribute to anybody.
+      // The first version of this cleanup missed them and left two behind.
+      for (const side of ["senderId", "receiverId"]) {
+        const found = await database.listDocuments({
+          databaseId: process.env.APPWRITE_DATABASE_ID!,
+          collectionId: process.env.APPWRITE_TRANSACTION_COLLECTION_ID!,
+          queries: [Query.equal(side, [userDocumentId])],
+        });
+        for (const doc of found.documents) {
+          await database.deleteDocument({
+            databaseId: process.env.APPWRITE_DATABASE_ID!,
+            collectionId: process.env.APPWRITE_TRANSACTION_COLLECTION_ID!,
+            documentId: doc.$id,
+          }).catch(() => undefined);
+        }
+      }
       for (const bank of await ownedBanks()) {
         await database.deleteDocument({
           databaseId: process.env.APPWRITE_DATABASE_ID!,

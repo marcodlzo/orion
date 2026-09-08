@@ -431,3 +431,65 @@ export async function transitionsForTransfer(
   );
   return rows;
 }
+
+/**
+ * A bank's transfer history, from PostgreSQL rather than Appwrite.
+ *
+ * ONE QUERY, BOTH SIDES. A transfer is a single row naming a sender bank and a
+ * recipient bank, so "everything involving this account" is one predicate. The
+ * Appwrite version issued two reads and merged them in JavaScript, which is
+ * where the pagination defect below came from.
+ *
+ * PAGINATED, DELIBERATELY. The Appwrite reads were not: both `listDocuments`
+ * calls used the default page size while `total` reported the real count, so a
+ * customer with more transfers than one page was quietly missing history and
+ * nothing said so. Porting that across would have carried a silent data-loss
+ * bug into the system of record.
+ *
+ * OWNERSHIP IS THE CALLER'S JOB, and it is done before this is reached: the
+ * bank document id passed in came from an actor-scoped lookup, never from the
+ * URL. This function takes an identifier and applies no scoping of its own,
+ * which is why it must not be called with anything a request supplied directly.
+ */
+export async function listTransfersForBank(
+  bankDocumentId: string,
+  options: { limit?: number; offset?: number } = {},
+  client?: PoolClient
+): Promise<TransferRow[]> {
+  if (!bankDocumentId) return [];
+
+  // A bound, so a pathological account cannot render an unbounded page. The
+  // caller pages; it does not receive everything and slice.
+  const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
+  const offset = Math.max(options.offset ?? 0, 0);
+
+  const { rows } = await run<TransferRow>(
+    client,
+    `SELECT * FROM transfers
+      WHERE sender_bank_document_id = $1
+         OR recipient_bank_document_id = $1
+      ORDER BY created_at DESC, id DESC
+      LIMIT $2 OFFSET $3`,
+    [bankDocumentId, limit, offset]
+  );
+
+  return rows;
+}
+
+/** How many transfers that bank has on either side. For paging. */
+export async function countTransfersForBank(
+  bankDocumentId: string,
+  client?: PoolClient
+): Promise<number> {
+  if (!bankDocumentId) return 0;
+
+  const { rows } = await run<{ count: string }>(
+    client,
+    `SELECT count(*)::text AS count FROM transfers
+      WHERE sender_bank_document_id = $1
+         OR recipient_bank_document_id = $1`,
+    [bankDocumentId]
+  );
+
+  return Number(rows[0].count);
+}

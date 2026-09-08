@@ -15,15 +15,15 @@ import {
   getOwnedBanks,
 } from "../repositories/banks.repository";
 import { NotFoundError } from "../repositories/errors";
-import { getTransactionsForOwnedBank } from "../repositories/transactions.repository";
 import { toAccountSummaryDTO } from "../dto/bank.dto";
 import {
   toTransactionDTOFromStore,
-  toTransactionDTOFromRecord,
+  toTransactionDTOFromTransfer,
 } from "../dto/transaction.dto";
 // THE READ half of the Plaid store. The writer — which advances a cursor — is
 // deliberately unreachable from here; an architecture test enforces the split.
 import { listTransactionsForOwnedAccounts } from "../db/repositories/plaid-transactions.read";
+import { listTransfersForBank } from "../db/repositories/transfers.repository";
 
 // An Item can back several bank records. Share its complete response across
 // list and detail readers using the same decrypted token, never across renders.
@@ -112,9 +112,20 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
     // balances and the two history sources are independent and can overlap.
     // The transaction repository still performs its own ownership check,
     // deduplicated by the repository's per-render memo.
-    const [plaidAccounts, transferTransactionsData, storedRows] = await Promise.all([
+    const [plaidAccounts, transferRows, storedRows] = await Promise.all([
       getPlaidAccounts(bank.accessToken),
-      getTransactionsForOwnedBank(actor, bank.$id),
+      // FROM POSTGRESQL, NOT APPWRITE. One query across both sides of the
+      // transfer, and PAGINATED — the Appwrite version issued two unpaginated
+      // reads, so a customer past the default page size was quietly missing
+      // history while `total` reported the real count.
+      //
+      // Ownership was proven above: `bank.$id` came from an actor-scoped
+      // lookup, never from the URL parameter.
+      //
+      // Switched only after `npm run history:compare` reported the two stores
+      // agreeing on real data. The Appwrite write continues for now, so this is
+      // reversible.
+      listTransfersForBank(bank.$id),
       listTransactionsForOwnedAccounts([bank.accountId]),
     ]);
 
@@ -124,12 +135,11 @@ export const getAccount = async ({ appwriteItemId }: getAccountProps) => {
     );
     if (!accountData) throw new NotFoundError("Account not found");
 
-    const transferTransactions = transferTransactionsData.documents.map(
-      (transferData) =>
-        toTransactionDTOFromRecord(
-          transferData,
-          transferData.senderBankId === bank.$id ? "debit" : "credit"
-        )
+    // Direction and status both come from the row: which bank reference matches,
+    // and what the state machine says. Neither is inferred from a formatted
+    // string or from how old the record is.
+    const transferTransactions = transferRows.map((row) =>
+      toTransactionDTOFromTransfer(row, bank.$id)
     );
 
     // FROM THE SYNCED STORE, NOT FROM PLAID. This used to call transactionsSync

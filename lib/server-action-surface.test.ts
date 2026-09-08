@@ -1217,10 +1217,18 @@ describe("migration tooling stays out of the request path", () => {
       "lib/funding/opening-allocation.ts",
       "lib/migration/backfill.ts",
       "lib/migration/verify.ts",
+      // THE HISTORY CUTOVER. Transfer history now comes from PostgreSQL rather
+      // than the Appwrite transaction collection, so the read layer that serves
+      // pages reaches the transfers repository. It is server-only and is
+      // neither a component, a route body nor an action body — which is what
+      // this test is actually about. Ownership is still proven by an
+      // actor-scoped bank lookup before the id reaches any query.
+      "lib/server/banks.ts",
       "lib/services/bank-linking.service.ts",
       "lib/services/rate-limit.service.ts",
       "lib/services/settlement.service.ts",
       "lib/services/transfers.service.ts",
+      "scripts/history-compare.ts",
       "scripts/opening-allocation.ts",
       "scripts/rate-limit-sweep.ts",
     ]);

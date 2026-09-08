@@ -32,7 +32,10 @@
     "e2e:cleanup": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/e2e-cleanup.ts",
     "e2e:cleanup:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/e2e-cleanup.ts --commit",
     "funding:opening": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/opening-allocation.ts",
-    "funding:opening:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/opening-allocation.ts --commit"
+    "funding:opening:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/opening-allocation.ts --commit",
+    "history:compare": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/history-compare.ts",
+    "history:backfill": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/history-backfill.ts",
+    "history:backfill:commit": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/history-backfill.ts --commit"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",

@@ -5,11 +5,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { encryptCredential } from "../crypto/envelope";
 
-const { accountGet, listDocuments, accountsGet, readTransactions } = vi.hoisted(() => ({
+const { accountGet, listDocuments, accountsGet, readTransactions, readTransfers } = vi.hoisted(() => ({
   accountGet: vi.fn(),
   listDocuments: vi.fn(),
   accountsGet: vi.fn(),
   readTransactions: vi.fn(),
+  readTransfers: vi.fn(),
 }));
 
 const sessions = new AsyncLocalStorage<string | undefined>();
@@ -28,6 +29,13 @@ vi.mock("../plaid", () => ({ plaidClient: { accountsGet } }));
 vi.mock("./dwolla", () => ({ addFundingSource: vi.fn(), createDwollaCustomer: vi.fn() }));
 vi.mock("../db/repositories/plaid-transactions.read", () => ({
   listTransactionsForOwnedAccounts: readTransactions,
+}));
+// Transfer history moved to PostgreSQL. Both history sources are now database
+// reads, so both are stubbed here — this suite measures ROUND TRIPS and
+// isolation, not what the ledger contains.
+vi.mock("../db/repositories/transfers.repository", () => ({
+  listTransfersForBank: readTransfers,
+  countTransfersForBank: vi.fn(async () => 0),
 }));
 
 import { getLoggedInUser } from "../actions/user.actions";
@@ -137,6 +145,7 @@ beforeEach(() => {
     })) },
   }));
   readTransactions.mockResolvedValue([]);
+  readTransfers.mockResolvedValue([]);
 });
 
 async function navigation() {
@@ -153,7 +162,12 @@ describe("render-path round trips and isolation", () => {
     expect(accountGet).toHaveBeenCalledTimes(1);
     expect(callsTo(USERS)).toHaveLength(1);
     expect(callsTo(BANKS)).toHaveLength(2); // owned list + selected bank proof
-    expect(callsTo(TRANSACTIONS)).toHaveLength(2); // sent + received
+    // ZERO, and that is the cutover. Transfer history used to be two
+    // unpaginated Appwrite reads, one for sent and one for received; it is now
+    // a single paginated PostgreSQL query across both sides of the row.
+    expect(callsTo(TRANSACTIONS)).toHaveLength(0);
+    expect(readTransfers).toHaveBeenCalledTimes(1);
+    expect(readTransfers).toHaveBeenCalledWith("bank-alice-savings");
     expect(accountsGet).toHaveBeenCalledTimes(2); // two Items, three accounts
     expect(readTransactions).toHaveBeenCalledTimes(1);
     expect(readTransactions).toHaveBeenCalledWith(["account-alice-savings"]);
@@ -243,8 +257,10 @@ describe("render-path round trips and isolation", () => {
     const pending = render("alice", () => getAccount({ appwriteItemId: "bank-alice-checking" }));
     try {
       await vi.waitFor(() => {
+        // Both history sources are PostgreSQL reads now, and both start while
+        // the provider call is still outstanding.
         expect(readTransactions).toHaveBeenCalledTimes(1);
-        expect(callsTo(TRANSACTIONS)).toHaveLength(2);
+        expect(readTransfers).toHaveBeenCalledTimes(1);
       });
       expect(callsTo(BANKS)).toHaveLength(1);
     } finally {
