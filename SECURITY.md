@@ -88,7 +88,6 @@ They are real, and this application should not be exposed to untrusted users.
 
 | Finding | Severity | Milestone |
 |---|---|---|
-| Nothing credits a customer's ledger account, so the solvency check is an exposure cap rather than a balance check | Medium | unscheduled |
 | `shareableId` is base64 encoding presented as encryption | Medium | unscheduled |
 
 END-TO-END TESTS HAVE LEFT THIS TABLE. Six Playwright tests drive a real
@@ -108,7 +107,24 @@ THEY DO NOT RUN ON EVERY COMMIT. The workflow is manual dispatch, because it
 needs sandbox credentials and creates provider-side records. A suite nothing
 runs is a suite that rots, so this is a real gap rather than a finished job.
 
-Two rows read **unscheduled**, and that is a correction rather than a
+THE SOLVENCY ROW HAS CLOSED. Customer accounts are credited by an explicit
+`opening_allocation`, booked against an equity account, so a balance has a floor
+other than the credit limit and the pre-transfer check is a real balance check.
+Applied to the development data, every account sums to exactly zero.
+
+READ THE CAVEAT. An allocation is NOT a deposit, and the ledger says which it
+was rather than asking anyone to take it on trust. A Plaid balance describes
+what the external bank holds; it is not money Orion received. The allocation is
+operator-issued, carries the snapshot it came from, is unique by index so a
+re-run cannot top anybody up, and an architecture test asserts no request path
+can reach the only code in the system that creates money. Real funding, when it
+exists, uses the same source-reference mechanism with a provider reference and
+is distinguishable by transaction kind.
+
+The credit allowance is deliberately unchanged and still separately labelled. It
+is not cash.
+
+One row reads **unscheduled**, and that is a correction rather than a
 demotion: rate limiting and `shareableId` were tagged to Milestone 2, which
 closed without them. A finding pointing at a completed milestone is how work
 quietly disappears, so they are named as unowned until something claims them.
