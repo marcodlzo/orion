@@ -1,0 +1,58 @@
+name: Sandbox browser tests
+
+# Separate from hermetic CI: requires a dedicated Appwrite sandbox project and
+# Plaid/Dwolla sandbox credentials in the sandbox-e2e GitHub environment.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-e2e
+  cancel-in-progress: false
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    environment: sandbox-e2e
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: orion
+          POSTGRES_PASSWORD: orion_e2e_password
+          POSTGRES_DB: orion_e2e_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U orion -d orion_e2e_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://orion:orion_e2e_password@localhost:5432/orion_e2e_test
+      NEXT_PUBLIC_APPWRITE_ENDPOINT: ${{ secrets.NEXT_PUBLIC_APPWRITE_ENDPOINT }}
+      NEXT_PUBLIC_APPWRITE_PROJECT: ${{ secrets.NEXT_PUBLIC_APPWRITE_PROJECT }}
+      NEXT_APPWRITE_KEY: ${{ secrets.NEXT_APPWRITE_KEY }}
+      APPWRITE_DATABASE_ID: ${{ secrets.APPWRITE_DATABASE_ID }}
+      APPWRITE_USER_COLLECTION_ID: ${{ secrets.APPWRITE_USER_COLLECTION_ID }}
+      APPWRITE_BANK_COLLECTION_ID: ${{ secrets.APPWRITE_BANK_COLLECTION_ID }}
+      APPWRITE_TRANSACTION_COLLECTION_ID: ${{ secrets.APPWRITE_TRANSACTION_COLLECTION_ID }}
+      PLAID_CLIENT_ID: ${{ secrets.PLAID_CLIENT_ID }}
+      PLAID_SECRET: ${{ secrets.PLAID_SECRET }}
+      DWOLLA_KEY: ${{ secrets.DWOLLA_KEY }}
+      DWOLLA_SECRET: ${{ secrets.DWOLLA_SECRET }}
+      DWOLLA_ENV: sandbox
+      CREDENTIAL_ENCRYPTION_KEYS: ${{ secrets.CREDENTIAL_ENCRYPTION_KEYS }}
+      CREDENTIAL_ENCRYPTION_ACTIVE_KEY_ID: ${{ secrets.CREDENTIAL_ENCRYPTION_ACTIVE_KEY_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: npm run test:e2e
+      # No browser trace, storage-state file, or screenshot uploads: they can
+      # contain session secrets and provider credentials from Link exchanges.

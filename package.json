@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "node --env-file-if-exists=.env.local --import tsx --import ./scripts/loader/server-only-alias.mjs scripts/e2e.ts",
     "db:up": "docker compose up -d db",
     "db:down": "docker compose down",
     "db:migrate": "node --env-file-if-exists=.env.local node_modules/node-pg-migrate/bin/node-pg-migrate.js up",
@@ -60,6 +61,7 @@
     "zod": "^3.23.4"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/node": "^20",
     "@types/pg": "^8.23.1",
     "@types/react": "^18",

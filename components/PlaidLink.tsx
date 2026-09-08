@@ -69,7 +69,13 @@ const PlaidLink = ({ variant }: PlaidLinkProps) => {
           Connect bank
         </Button>
       ): variant === 'ghost' ? (
-        <Button onClick={() => open()} variant="ghost" className="plaidlink-ghost">
+        // `disabled={!ready}` on EVERY variant, not just primary. Plaid's
+        // `open()` is a no-op until the link token has loaded, so a click
+        // before then did nothing at all and said nothing about why — the
+        // user pressed a live-looking button and the app ignored them.
+        // Only the primary variant was guarded; the two that actually appear
+        // in the sidebar were not.
+        <Button onClick={() => open()} disabled={!ready} variant="ghost" className="plaidlink-ghost">
           <Image 
             src="/icons/connect-bank.svg"
             alt="connect bank"
@@ -79,7 +85,7 @@ const PlaidLink = ({ variant }: PlaidLinkProps) => {
           <p className='hiddenl text-[16px] font-semibold text-black-2 xl:block'>Connect bank</p>
         </Button>
       ): (
-        <Button onClick={() => open()} className="plaidlink-default">
+        <Button onClick={() => open()} disabled={!ready} className="plaidlink-default">
           <Image 
             src="/icons/connect-bank.svg"
             alt="connect bank"

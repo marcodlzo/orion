@@ -30,6 +30,12 @@ import { readAllLegacyBanks } from "../lib/migration/appwrite-source";
 import { syncPlaidItem } from "../lib/plaid-sync/sync";
 
 async function main(): Promise<number> {
+  const args = process.argv.slice(2);
+  if (args.length && (args.length !== 2 || args[0] !== "--item-id" || !/^[\w-]+$/.test(args[1]))) {
+    console.error("Usage: npm run plaid:sync -- [--item-id ITEM_ID]");
+    return 2;
+  }
+  const selectedItem = args[1];
   if (!process.env.DATABASE_URL) {
     console.error("DATABASE_URL is not set.");
     return 2;
@@ -59,11 +65,15 @@ async function main(): Promise<number> {
     const itemId = typeof bank.bankId === "string" ? bank.bankId.trim() : "";
     const accessToken =
       typeof bank.accessToken === "string" ? bank.accessToken.trim() : "";
-    if (!itemId || !accessToken) continue;
+    if (!itemId || !accessToken || (selectedItem && selectedItem !== itemId)) continue;
     if (!byItem.has(itemId)) byItem.set(itemId, accessToken);
   }
 
-  const skipped = scan.documents.length - byItem.size;
+  if (selectedItem && byItem.size === 0) {
+    console.error("The selected Item has no linked bank with a usable credential.");
+    return 2;
+  }
+  const skipped = selectedItem ? 0 : scan.documents.length - byItem.size;
   let needsAttention = 0;
 
   const itemIds = Array.from(byItem.keys());
