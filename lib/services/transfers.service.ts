@@ -21,10 +21,6 @@ import {
   getOwnedBankByDocumentId,
 } from "../repositories/banks.repository";
 import { NotFoundError } from "../repositories/errors";
-import {
-  createTransactionRecord,
-  toLegacyTransactionAmount,
-} from "../repositories/transactions.repository";
 import { isPositive, tryParseUsd, type Money } from "../domain/money";
 // THE ONE PERMITTED CROSSING from a request path into lib/db. The
 // import-boundary suite names this file explicitly; a second crossing is a
@@ -159,9 +155,15 @@ export class InsufficientAvailableFundsError extends Error {
  * fake rollback would be a lie. The caller must be told the transfer was
  * submitted and that our record is missing.
  *
- * Resolving this properly needs the provider reference persisted and a
- * reconciliation pass. Both are later milestones — see the schema note on
- * PROVIDER_REFERENCE_PERSISTENCE below.
+ * STILL REACHABLE, for one case only: Dwolla accepting the transfer and
+ * returning no reference. The reference is what makes a transfer reconcilable,
+ * so a missing one is the genuinely unrecoverable outcome — the claim stays
+ * `requested` rather than being marked failed, which would claim nothing
+ * happened, or given a placeholder id, which would defeat the unique index.
+ *
+ * It is no longer raised for a failed local write. There is no local write
+ * after the provider call any more: the Appwrite transaction record is gone and
+ * everything returned comes from rows committed BEFORE Dwolla was asked.
  */
 export class TransferSubmittedButNotRecordedError extends Error {
   readonly code = "TRANSFER_SUBMITTED_NOT_RECORDED";
@@ -175,25 +177,6 @@ export class TransferSubmittedButNotRecordedError extends Error {
     Object.setPrototypeOf(this, TransferSubmittedButNotRecordedError.prototype);
   }
 }
-
-/**
- * BLOCKED ON DATASTORE SCHEMA.
- *
- * Dwolla returns a transfer URL and id. Without storing it, no local record can
- * ever be matched to a provider transfer, which makes reconciliation
- * structurally impossible.
- *
- * The Appwrite transaction collection currently has no attribute for it, and
- * Appwrite rejects a createDocument containing an unknown attribute, so writing
- * one would fail at runtime. Adding it requires a console change:
- *
- *   collection: transactions
- *   attribute:  providerTransferId   String(255)   optional
- *
- * Until that exists the reference is captured and deliberately dropped rather
- * than silently invented. It is NOT returned to the browser.
- */
-export const PROVIDER_REFERENCE_PERSISTENCE = "blocked: schema lacks providerTransferId";
 
 /** Decode the recipient reference without throwing on malformed input. */
 function decodeRecipientReference(reference: string): string | null {
@@ -452,23 +435,20 @@ export async function executeTransfer(
     )
   );
 
-  // 6. Identities are server-derived. The caller supplies neither side.
-  try {
-    await createTransactionRecord({
-      name: intent.note || "Transfer",
-      // Degraded to the legacy string column here and nowhere else.
-      amount: toLegacyTransactionAmount(intent.amount),
-      senderId: actor.userId,
-      senderBankId: sourceBank.$id,
-      receiverId: relatedUserId(recipientBank.userId),
-      receiverBankId: recipientBank.$id,
-      email: intent.recipientEmail,
-    });
-  } catch (error) {
-    // Dwolla already accepted the transfer. Reporting failure here would tell
-    // the user nothing happened, which is false.
-    throw new TransferSubmittedButNotRecordedError({ cause: error });
-  }
+  // 6. THE APPWRITE WRITE IS GONE. Phase 2 of the cutover.
+  //
+  //    A transfer was recorded twice: the durable claim in PostgreSQL, and a
+  //    second document in the Appwrite transaction collection that existed only
+  //    to render history. History now reads from PostgreSQL — verified by
+  //    `npm run history:compare` reporting both stores agreeing before the read
+  //    was switched — so the second write served nothing but the risk of the
+  //    two disagreeing.
+  //
+  //    It also cost a whole failure mode. The write happened AFTER Dwolla had
+  //    accepted, so a failure there meant money had moved and the record had
+  //    not, which is why TransferSubmittedButNotRecordedError existed for it.
+  //    Everything this returns now comes from rows committed BEFORE the
+  //    provider was called.
 
   // 7. narrow result
   return {

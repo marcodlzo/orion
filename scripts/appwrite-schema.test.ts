@@ -219,14 +219,18 @@ describe("required attributes match what the application writes", () => {
       .map((a) => a.key)
       .sort();
 
-  it("writes every required transactions attribute", () => {
-    const written = writtenKeys(
-      read("lib/services/transfers.service.ts"),
+  it("NO LONGER writes the transactions collection at all", () => {
+    // The history cutover removed the second write. A transfer is recorded once
+    // now, in PostgreSQL, before the provider is called — the Appwrite document
+    // existed only to render history, and history reads from PostgreSQL.
+    //
+    // The collection still holds legacy rows, so the schema is not dropped. What
+    // is asserted is that the APPLICATION no longer writes it: a reintroduced
+    // write would be a second source of truth for the same money, and this is
+    // where that would be caught.
+    expect(read("lib/services/transfers.service.ts")).not.toContain(
       "createTransactionRecord("
     );
-
-    expect(written.length).toBeGreaterThan(0);
-    expect(requiredOf("transactions").filter((k) => !written.includes(k))).toEqual([]);
   });
 
   it("writes every required banks attribute", () => {

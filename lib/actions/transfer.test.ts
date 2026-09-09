@@ -19,9 +19,11 @@ import { TRANSFER_RESULT_DTO_FIELDS } from "../dto/transfer.dto";
  *
  * These assert intended behaviour and must not be relaxed.
  *
- * WHAT THESE DO NOT PROVE: idempotency. Two calls create two transfers. Moving
- * orchestration to the server removed the browser's capability; it did not
- * deduplicate requests.
+ * IDEMPOTENCY IS PROVEN HERE, in `K. idempotency`, by replaying the request and
+ * asserting one financial effect — never by observing that a key row exists.
+ *
+ * The Appwrite transaction write is GONE as of the history cutover, so a
+ * transfer is recorded once, in PostgreSQL, before the provider is called.
  */
 
 const {
@@ -381,16 +383,25 @@ describe("G. a valid transfer", () => {
       receiverBankId: "bank-doc-mallory",
     } as unknown);
 
-    const written = createTransactionRecord.mock.calls[0][0];
-    expect(written).toMatchObject({
-      senderId: "user-doc-alice",     // the actor
-      senderBankId: "bank-doc-alice", // the owned source
-      receiverId: "user-doc-bob",     // the resolved recipient
-      receiverBankId: "bank-doc-bob",
-      amount: "25.00",  // legacy string column, produced by the exact formatter
+    // ASSERTED ON THE CLAIM, not on an Appwrite document. The second write is
+    // gone with the history cutover, so the parties are recorded once — in
+    // PostgreSQL, BEFORE the provider is called, rather than in a second store
+    // afterwards.
+    const claimed = claimTransfer.mock.calls[0][0];
+    expect(claimed).toMatchObject({
+      senderBankDocumentId: "bank-doc-alice",   // the owned source
+      recipientUserDocumentId: "user-doc-bob",  // the resolved recipient
+      recipientBankDocumentId: "bank-doc-bob",
+      // EXACT MINOR UNITS, not the legacy decimal string. That degradation
+      // existed only for the Appwrite column and went with it.
+      amountMinor: 2500,
+      currency: "USD",
     });
-    expect(written).not.toHaveProperty("sourceFundingSourceUrl");
-    expect(written).not.toHaveProperty("fundingSourceUrl");
+    // The actor owns the row; the caller's forged sender is nowhere in it.
+    expect(claimed.customerId).toBe("pg-customer-alice");
+    expect(JSON.stringify(claimed)).not.toContain("mallory");
+    expect(claimed).not.toHaveProperty("sourceFundingSourceUrl");
+    expect(claimed).not.toHaveProperty("fundingSourceUrl");
   });
 
   it("ignores funding-source URLs supplied by the caller", async () => {
@@ -411,50 +422,66 @@ describe("G. a valid transfer", () => {
   });
 
   it.each([
-    ["10", 1000, "10.00"],
-    ["10.5", 1050, "10.50"],
-    ["0.01", 1, "0.01"],
-    ["1000.99", 100099, "1000.99"],
+    ["10", 1000],
+    ["10.5", 1050],
+    ["0.01", 1],
+    ["1000.99", 100099],
   ])(
-    "form string %s becomes %d minor units and persists as %s",
-    async (input, minor, persisted) => {
+    "form string %s becomes %d minor units, to the provider and to storage",
+    async (input, minor) => {
       await initiateTransfer({ ...VALID_INTENT, amount: input });
 
       expect(createDwollaTransfer.mock.calls[0][0].amount).toEqual({
         amountMinor: minor,
         currency: "USD",
       });
-      expect(createTransactionRecord.mock.calls[0][0].amount).toBe(persisted);
+      // STRONGER THAN IT WAS. This used to assert a decimal STRING reaching the
+      // Appwrite column, which was the one place money was degraded on its way
+      // to storage. It is integer minor units the whole way now.
+      expect(claimTransfer.mock.calls[0][0].amountMinor).toBe(minor);
     }
   );
 });
 
 describe("H. provider failure", () => {
-  it("writes no transaction record when Dwolla rejects the transfer", async () => {
+  it("marks the transfer failed and releases the hold when Dwolla rejects it", async () => {
     createDwollaTransfer.mockRejectedValue(new Error("dwolla rejected"));
 
     await expect(initiateTransfer(VALID_INTENT)).rejects.toThrow();
 
-    // A record here would be a transfer that never happened.
-    expect(createTransactionRecord).not.toHaveBeenCalled();
+    // The claim is DELIBERATELY still there — it was committed before the
+    // provider was called, which is what makes a retry safe. What must happen
+    // is an explicit terminal state and the reservation given back, rather
+    // than an abandoned row quietly consuming the customer's allowance.
+    expect(markFailed).toHaveBeenCalled();
+    expect(releaseHold).toHaveBeenCalled();
+    expect(markSubmitted).not.toHaveBeenCalled();
   });
 });
 
 describe("I. provider succeeded but the local write failed", () => {
   it("reports the partial failure instead of claiming nothing happened", async () => {
-    createTransactionRecord.mockRejectedValue(new Error("appwrite is down"));
+    // THE CAUSE CHANGED, THE INVARIANT DID NOT. This used to inject a failing
+    // Appwrite write; there is no local write after the provider call any more.
+    // What remains is the genuinely unrecoverable case: Dwolla accepts and
+    // returns NO reference, so the transfer can never be matched to a provider
+    // record.
+    createDwollaTransfer.mockResolvedValue({ transferUrl: null, transferId: null });
 
     const error = await initiateTransfer(VALID_INTENT).catch((e: unknown) => e);
 
-    // Dwolla already accepted the transfer. It cannot be undone by not writing
-    // a row, and reporting a plain failure would tell the user their money did
-    // not move when it did.
+    // Money moved. Reporting a plain failure would tell the user it did not.
     expect(error).toBeInstanceOf(TransferSubmittedButNotRecordedError);
     expect(createDwollaTransfer).toHaveBeenCalledTimes(1);
+    // NOT marked failed — that would claim nothing happened — and NOT given a
+    // placeholder reference, which would defeat the unique index. The claim
+    // stays `requested`, which is what the unresolved-attempt index surfaces.
+    expect(markFailed).not.toHaveBeenCalled();
+    expect(markSubmitted).not.toHaveBeenCalled();
   });
 
   it("does not put provider credentials into the error", async () => {
-    createTransactionRecord.mockRejectedValue(new Error("appwrite is down"));
+    createDwollaTransfer.mockResolvedValue({ transferUrl: null, transferId: null });
 
     const error = await initiateTransfer(VALID_INTENT).catch((e: unknown) => e);
     const text = `${(error as Error).message} ${(error as Error).stack ?? ""}`;
@@ -501,20 +528,12 @@ describe("J. the returned DTO", () => {
   });
 });
 
-describe("NOT IDEMPOTENT — tracked defect", () => {
-  it("two calls create two provider transfers", async () => {
-    await initiateTransfer(VALID_INTENT);
-    await initiateTransfer(VALID_INTENT);
-
-    // Server ownership removed the browser's capability to name funding
-    // sources. It did NOT deduplicate requests. A retry, a second tab or a
-    // replayed request still moves money twice.
-    expect(createDwollaTransfer).toHaveBeenCalledTimes(2);
-    expect(createTransactionRecord).toHaveBeenCalledTimes(2);
-    // AFTER (idempotency milestone): the second call replays the first result
-    // and the provider is called once.
-  });
-});
+// The "NOT IDEMPOTENT" characterisation test stood here. It asserted the
+// pre-Phase-7 behaviour — two calls, two provider transfers — and its own
+// AFTER note said it would be replaced when idempotency landed. It has been:
+// `K. idempotency` below proves the real behaviour by REPLAY, which is the only
+// way that proves anything. Removing a defect test whose milestone has landed is
+// the intended lifecycle, not a loss of coverage.
 
 /**
  * IDEMPOTENCY, AT THE ENDPOINT.
