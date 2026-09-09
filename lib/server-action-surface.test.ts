@@ -320,7 +320,6 @@ const MUST_STAY_INTERNAL = [
   "addFundingSource",
   "createDwollaTransfer",
   "createTransaction",
-  "createTransactionRecord",
   "createTransfer",
   "executeTransfer",
   "findCounterpartyBankByAccountId",
@@ -464,7 +463,6 @@ const ADMIN_CLIENT_ALLOWED = [
   "lib/appwrite.ts",
   "lib/repositories/accounts.repository.ts",
   "lib/repositories/banks.repository.ts",
-  "lib/repositories/transactions.repository.ts",
   "lib/repositories/users.repository.ts",
   // OPERATOR TOOLING, NOT A REQUEST PATH. Unlike the repositories above, this
   // module scopes nothing: it reads every user and every bank document, because
@@ -878,7 +876,6 @@ describe("server-only boundaries", () => {
     "lib/services/transfers.service.ts",
     "lib/repositories/accounts.repository.ts",
     "lib/repositories/banks.repository.ts",
-    "lib/repositories/transactions.repository.ts",
     "lib/repositories/users.repository.ts",
   ];
 

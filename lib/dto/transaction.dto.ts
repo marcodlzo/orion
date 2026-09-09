@@ -106,63 +106,10 @@ export function toTransactionDTOFromStore(
 }
 
 /**
- * Map a stored transfer record to the display DTO.
- *
- * `direction` is decided by the caller, which knows which bank is being viewed.
- * `status` is the transfer's own state when one is known — these rows come from
- * the legacy Appwrite collection, which has no state column, so a transfer whose
- * state is not supplied is shown as `submitted` rather than as a settlement
- * nobody confirmed.
- */
-export function toTransactionDTOFromRecord(
-  record: unknown,
-  direction: "debit" | "credit",
-  status: TransactionStatus = "submitted"
-): TransactionDTO {
-  const r = (record ?? {}) as Record<string, unknown>;
-
-  return {
-    id: str(r.$id),
-    name: str(r.name),
-    date: str(r.$createdAt),
-    amountMinor: legacyAmountToMinor(r.amount),
-    direction,
-    status,
-    paymentChannel: str(r.channel),
-    category: str(r.category),
-  };
-}
-
-/**
- * The legacy transfer amount, which is a STRING column holding decimal dollars.
- *
- * Parsed by digits rather than by `Number(value) * 100`, for the same reason the
- * Plaid adapter avoids that: the multiplication is fractionally low for many
- * values and truncation silently loses a cent.
- *
- * An unparseable value yields 0 rather than throwing. This is a display path for
- * historical rows written by the tutorial code, and taking the whole history
- * page down over one malformed legacy string would be a worse outcome than
- * showing it as zero — which is visibly wrong rather than quietly wrong.
- */
-function legacyAmountToMinor(value: unknown): number {
-  const raw = typeof value === "string" ? value.trim() : String(value ?? "");
-  const match = /^(-)?(\d+)(?:\.(\d{1,2}))?$/.exec(raw);
-  if (!match) return 0;
-
-  const [, sign, whole, fraction = "0"] = match;
-  const minor = Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
-  if (!Number.isSafeInteger(minor)) return 0;
-
-  return sign ? -minor : minor;
-}
-
-/**
  * A transfer row from PostgreSQL, as history.
  *
- * Replaces `toTransactionDTOFromRecord`, which read the Appwrite transaction
- * collection. Both exist while the cutover verifies they agree; the Appwrite one
- * goes when the dual write does.
+ * Transfer history is authoritative in PostgreSQL. The former Appwrite mapper
+ * was removed after the read cutover and dual-write removal were verified.
  *
  * DIRECTION IS A COMPARISON, NOT AN INFERENCE. The viewing bank is either the
  * sender or the recipient, and the row says which. The original code read the

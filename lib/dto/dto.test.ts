@@ -12,7 +12,6 @@ import {
 import {
   TRANSACTION_DTO_FIELDS,
   toTransactionDTOFromStore,
-  toTransactionDTOFromRecord,
 } from "./transaction.dto";
 
 /**
@@ -304,80 +303,4 @@ describe("TransactionDTO", () => {
     expect(Object.keys(dto).sort()).toEqual([...TRANSACTION_DTO_FIELDS].sort());
   });
 
-  it("maps a stored transfer record and honours the caller's direction", () => {
-    const dto = toTransactionDTOFromRecord(
-      {
-        $id: "tx-doc-1",
-        $createdAt: "2026-02-02T10:00:00.000Z",
-        name: "Rent",
-        amount: "1200.00",
-        channel: "online",
-        category: "Transfer",
-        senderBankId: "bank-doc-1",
-        receiverBankId: "bank-doc-2",
-        senderId: "user-doc-1",
-        receiverId: "user-doc-2",
-        email: "person@example.invalid",
-      },
-      "debit"
-    );
-
-    expect(dto).toEqual({
-      id: "tx-doc-1",
-      name: "Rent",
-      date: "2026-02-02T10:00:00.000Z",
-      // The legacy column is the STRING "1200.00". Parsed by digits, not by
-      // Number(value) * 100, which is fractionally low for many values.
-      amountMinor: 120000,
-      direction: "debit",
-      // A legacy row carries no state, so it is shown as submitted rather than
-      // as a settlement nobody confirmed.
-      status: "submitted",
-      paymentChannel: "online",
-      category: "Transfer",
-    });
-  });
-
-  it("parses legacy decimal strings without float multiplication", () => {
-    const amountOf = (amount: string) =>
-      toTransactionDTOFromRecord(
-        { $id: "t", $createdAt: "d", name: "n", amount, channel: "", category: "" },
-        "debit"
-      ).amountMinor;
-
-    expect(amountOf("1200.00")).toBe(120000);
-    expect(amountOf("0.01")).toBe(1);
-    expect(amountOf("8.11")).toBe(811);
-    expect(amountOf("104.06")).toBe(10406);
-    // One decimal place is padded, not misread as one cent.
-    expect(amountOf("5.5")).toBe(550);
-    expect(amountOf("7")).toBe(700);
-    // Unparseable legacy values render as zero rather than taking the page
-    // down: visibly wrong beats quietly wrong.
-    expect(amountOf("not money")).toBe(0);
-    expect(amountOf("")).toBe(0);
-  });
-
-  it("drops counterparty identifiers the table never renders", () => {
-    const dto = toTransactionDTOFromRecord(
-      {
-        $id: "tx-doc-1",
-        $createdAt: "2026-02-02T10:00:00.000Z",
-        name: "Rent",
-        amount: "1200.00",
-        channel: "online",
-        category: "Transfer",
-        senderBankId: "bank-doc-1",
-        receiverBankId: "bank-doc-2",
-        senderId: "user-doc-1",
-        receiverId: "user-doc-2",
-        email: "person@example.invalid",
-      },
-      "credit"
-    );
-
-    for (const key of ["senderId", "receiverId", "senderBankId", "receiverBankId", "email"]) {
-      expect(dto).not.toHaveProperty(key);
-    }
-  });
 });

@@ -1,8 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Money } from "../domain/money";
 import type { BankRecord } from "../repositories/banks.repository";
-import type { TransactionRecord } from "../repositories/transactions.repository";
 import { closePool, query } from "../db/pool";
 import { requireTestDatabase } from "../db/test-database";
 import { upsertBankingCustomer } from "../db/repositories/banking-customers.repository";
@@ -64,7 +62,6 @@ const stub = vi.hoisted(() => ({
   getOwnedBankByDocumentId: vi.fn(),
   findCounterpartyBankByAccountId: vi.fn(),
   createDwollaTransfer: vi.fn(),
-  createTransactionRecord: vi.fn(),
 }));
 
 vi.mock("../repositories/banks.repository", () => ({
@@ -74,13 +71,6 @@ vi.mock("../repositories/banks.repository", () => ({
 
 vi.mock("../server/dwolla", () => ({
   createDwollaTransfer: stub.createDwollaTransfer,
-}));
-
-vi.mock("../repositories/transactions.repository", () => ({
-  createTransactionRecord: stub.createTransactionRecord,
-  // Not faked: the real conversion, so an amount that reached the legacy column
-  // wrong would show up here rather than being hidden by a stub.
-  toLegacyTransactionAmount: (money: Money) => (money.amountMinor / 100).toFixed(2),
 }));
 
 /**
@@ -112,11 +102,6 @@ beforeEach(async () => {
 
   stub.getOwnedBankByDocumentId.mockResolvedValue(SOURCE_BANK);
   stub.findCounterpartyBankByAccountId.mockResolvedValue(RECIPIENT_BANK);
-  stub.createTransactionRecord.mockResolvedValue({
-    $id: "txn-1",
-    $createdAt: new Date().toISOString(),
-  } satisfies Partial<TransactionRecord> as TransactionRecord);
-
   // Re-armed per test, not set once: clearAllMocks drops implementations set
   // through mockResolvedValue, and a stub returning undefined would fail these
   // tests somewhere unrelated to what they assert.

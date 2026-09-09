@@ -32,7 +32,6 @@ const {
   findUserByAuthId,
   getOwnedBankByDocumentId,
   findCounterpartyBankByAccountId,
-  createTransactionRecord,
   createDwollaTransfer,
   findCustomerByAuthId,
   upsertBankingCustomer,
@@ -50,7 +49,6 @@ const {
   findUserByAuthId: vi.fn(),
   getOwnedBankByDocumentId: vi.fn(),
   findCounterpartyBankByAccountId: vi.fn(),
-  createTransactionRecord: vi.fn(),
   createDwollaTransfer: vi.fn(),
   findCustomerByAuthId: vi.fn(),
   upsertBankingCustomer: vi.fn(),
@@ -117,16 +115,6 @@ vi.mock("../repositories/banks.repository", () => ({
   getOwnedBankByAccountId: vi.fn(),
   createBankForActor: vi.fn(),
 }));
-vi.mock("../repositories/transactions.repository", async () => {
-  // The legacy amount adapter is real: these tests assert the exact decimal
-  // string that reaches the datastore, so stubbing it would prove nothing.
-  const { toDecimalString } = await import("../domain/money");
-  return {
-    createTransactionRecord,
-    getTransactionsForOwnedBank: vi.fn(),
-    toLegacyTransactionAmount: toDecimalString,
-  };
-});
 vi.mock("../db/repositories/banking-customers.repository", () => ({
   findCustomerByAuthId,
   upsertBankingCustomer,
@@ -266,7 +254,6 @@ beforeEach(() => {
       transferId: "transfer-1",
     };
   });
-  createTransactionRecord.mockResolvedValue({ $id: "tx-doc-1" });
 });
 
 describe("authentication", () => {
@@ -279,7 +266,6 @@ describe("authentication", () => {
     expect(getOwnedBankByDocumentId).not.toHaveBeenCalled();
     expect(findCounterpartyBankByAccountId).not.toHaveBeenCalled();
     expect(createDwollaTransfer).not.toHaveBeenCalled();
-    expect(createTransactionRecord).not.toHaveBeenCalled();
   });
 });
 
@@ -293,7 +279,6 @@ describe("E. source ownership", () => {
     ).rejects.toBeInstanceOf(NotFoundError);
 
     expect(createDwollaTransfer).not.toHaveBeenCalled();
-    expect(createTransactionRecord).not.toHaveBeenCalled();
   });
 
   it("resolves the source through the actor-scoped repository", async () => {
@@ -312,7 +297,6 @@ describe("F. recipient reference validation", () => {
     ).rejects.toBeInstanceOf(InvalidTransferIntentError);
 
     expect(createDwollaTransfer).not.toHaveBeenCalled();
-    expect(createTransactionRecord).not.toHaveBeenCalled();
   });
 
   it("raises NotFound when the reference resolves to no account", async () => {
@@ -553,7 +537,6 @@ describe("K. idempotency", () => {
 
     // The assertion that matters: zero provider calls, not "a row was found".
     expect(createDwollaTransfer).not.toHaveBeenCalled();
-    expect(createTransactionRecord).not.toHaveBeenCalled();
     expect(result.replayed).toBe(true);
     expect(result.status).toBe("submitted");
   });
@@ -703,7 +686,6 @@ describe("K. idempotency", () => {
     // NO PROVIDER CALL AT ALL. Nothing is in motion to unwind.
     expect(createDwollaTransfer).not.toHaveBeenCalled();
     expect(markSubmitted).not.toHaveBeenCalled();
-    expect(createTransactionRecord).not.toHaveBeenCalled();
   });
 
   it("records an explicit failure for a refused transfer rather than abandoning it", async () => {
@@ -882,7 +864,6 @@ describe("K. idempotency", () => {
       transferUrl: "https://dwolla.invalid/transfers/dwolla-transfer-1",
       transferId: "dwolla-transfer-1",
     });
-    createTransactionRecord.mockResolvedValue({ $id: "tx-doc-1" });
 
     // Same transfer, cosmetically different input: a different note and a
     // differently-spelled amount that parses to the same minor units.
