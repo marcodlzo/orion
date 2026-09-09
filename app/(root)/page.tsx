@@ -34,6 +34,7 @@ const Home = async ({ searchParams: { id, page } }: SearchParamProps) => {
             accounts={accountsData}
             totalBanks={accounts?.totalBanks}
             totalCurrentBalanceMinor={accounts?.totalCurrentBalanceMinor}
+            ledgerSummary={accounts.ledgerSummary}
           />
         </header>
 

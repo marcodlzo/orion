@@ -63,9 +63,14 @@ const BankInfo = ({ account, appwriteItemId, type }: BankInfoProps) => {
           )}
         </div>
 
-        <p className={`text-16 font-medium text-blue-700 ${colors.subText}`}>
-          {formatMinorUnits(account.currentBalanceMinor)}
-        </p>
+        <div>
+          <p className={`text-16 font-medium text-blue-700 ${colors.subText}`}>
+            {formatMinorUnits(account.currentBalanceMinor)}
+          </p>
+          <p className={`text-10 font-medium uppercase tracking-wide ${colors.subText}`}>
+            Provider balance
+          </p>
+        </div>
       </div>
     </div>
   );

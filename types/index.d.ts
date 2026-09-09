@@ -51,7 +51,6 @@ declare type NewUserParams = {
 
 declare type Account = {
   id: string;
-  availableBalance: number;
   currentBalanceMinor: number;
   officialName: string;
   mask: string;
@@ -61,6 +60,13 @@ declare type Account = {
   subtype: string;
   appwriteItemId: string;
   shareableId: string;
+};
+
+declare type AccountBalanceSummary = {
+  ledgerBalanceMinor: number;
+  activeHoldsMinor: number;
+  creditAllowanceMinor: number;
+  availableToTransferMinor: number;
 };
 
 declare type Transaction = {
@@ -205,6 +211,7 @@ declare interface TotalBalanceBoxProps {
   accounts: import("@/lib/dto/bank.dto").AccountSummaryDTO[];
   totalBanks: number;
   totalCurrentBalanceMinor: number;
+  ledgerSummary: AccountBalanceSummary;
 }
 
 declare interface FooterProps {

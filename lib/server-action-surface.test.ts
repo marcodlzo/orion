@@ -1106,6 +1106,9 @@ describe("migration tooling stays out of the request path", () => {
     "lib/db/repositories/webhook-events.repository.ts",
     "lib/db/repositories/ledger.repository.ts",
     "lib/db/repositories/holds.repository.ts",
+    // Phase 3: the account UI shows the actor-scoped, derived ledger balance
+    // beside Plaid's provider balance. This module contains SELECTs only.
+    "lib/db/repositories/account-balances.read.ts",
     // Milestone 11: transaction history now comes from the synced store instead
     // of a live Plaid call during SSR. READ-ONLY by construction — the module
     // that advances a cursor is a different file and stays operator-only.
@@ -1181,6 +1184,7 @@ describe("migration tooling stays out of the request path", () => {
       "lib/db/repositories/holds.repository.ts",
       "lib/db/repositories/rate-limits.repository.ts",
       "lib/db/repositories/linked-accounts.repository.ts",
+      "lib/db/repositories/account-balances.read.ts",
     ];
 
     const importers = Array.from(

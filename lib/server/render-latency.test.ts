@@ -5,12 +5,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { encryptCredential } from "../crypto/envelope";
 
-const { accountGet, listDocuments, accountsGet, readTransactions, readTransfers } = vi.hoisted(() => ({
+const { accountGet, listDocuments, accountsGet, readTransactions, readTransfers, readBalanceSummary } = vi.hoisted(() => ({
   accountGet: vi.fn(),
   listDocuments: vi.fn(),
   accountsGet: vi.fn(),
   readTransactions: vi.fn(),
   readTransfers: vi.fn(),
+  readBalanceSummary: vi.fn(),
 }));
 
 const sessions = new AsyncLocalStorage<string | undefined>();
@@ -36,6 +37,9 @@ vi.mock("../db/repositories/plaid-transactions.read", () => ({
 vi.mock("../db/repositories/transfers.repository", () => ({
   listTransfersForBank: readTransfers,
   countTransfersForBank: vi.fn(async () => 0),
+}));
+vi.mock("../db/repositories/account-balances.read", () => ({
+  getAccountBalanceSummary: readBalanceSummary,
 }));
 
 import { getLoggedInUser } from "../actions/user.actions";
@@ -146,6 +150,12 @@ beforeEach(() => {
   }));
   readTransactions.mockResolvedValue([]);
   readTransfers.mockResolvedValue([]);
+  readBalanceSummary.mockResolvedValue({
+    ledgerBalanceMinor: 25_00,
+    activeHoldsMinor: 5_00,
+    creditAllowanceMinor: 50_00,
+    availableToTransferMinor: 70_00,
+  });
 });
 
 async function navigation() {
@@ -174,6 +184,16 @@ describe("render-path round trips and isolation", () => {
     expect(result.layoutUser).toEqual(result.pageUser);
     expect(result.accounts.data).toHaveLength(3);
     expect(result.accounts.totalCurrentBalanceMinor).toBe(4000);
+    expect(result.accounts.ledgerSummary).toEqual({
+      ledgerBalanceMinor: 25_00,
+      activeHoldsMinor: 5_00,
+      creditAllowanceMinor: 50_00,
+      availableToTransferMinor: 70_00,
+    });
+    expect(readBalanceSummary).toHaveBeenCalledTimes(1);
+    expect(readBalanceSummary).toHaveBeenCalledWith(
+      expect.objectContaining({ authId: "auth-alice", userId: "user-alice" })
+    );
     expect(result.account.data.currentBalanceMinor).toBe(2000);
     expect(result.account.data).toEqual(result.accounts.data[1]);
     expect(Object.keys(result.account.data).sort()).toEqual([...ACCOUNT_SUMMARY_DTO_FIELDS].sort());

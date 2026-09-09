@@ -16,6 +16,9 @@ const BankCard = ({ account, userName, showBalance = true }: CreditCardProps) =>
             <p className="font-ibm-plex-serif font-black text-white">
               {formatMinorUnits(account.currentBalanceMinor)}
             </p>
+            <p className="text-10 font-medium uppercase tracking-wider text-blue-100">
+              Provider balance
+            </p>
           </div>
 
           <article className="flex flex-col gap-2">

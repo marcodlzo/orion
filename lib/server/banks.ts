@@ -24,6 +24,7 @@ import {
 // deliberately unreachable from here; an architecture test enforces the split.
 import { listTransactionsForOwnedAccounts } from "../db/repositories/plaid-transactions.read";
 import { listTransfersForBank } from "../db/repositories/transfers.repository";
+import { getAccountBalanceSummary } from "../db/repositories/account-balances.read";
 
 // An Item can back several bank records. Share its complete response across
 // list and detail readers using the same decrypted token, never across renders.
@@ -46,8 +47,8 @@ export const getAccounts = cache(async () => {
     const actor = await requireActor();
     const banks = await getOwnedBanks(actor);
 
-    const accounts = await Promise.all(
-      banks?.map(async (bank) => {
+    const [accounts, ledgerSummary] = await Promise.all([
+      Promise.all(banks?.map(async (bank) => {
         // get each account info from plaid
         const plaidAccounts = await getPlaidAccounts(bank.accessToken);
 
@@ -65,8 +66,9 @@ export const getAccounts = cache(async () => {
         // The bank record holds accessToken and fundingSourceUrl. It is passed
         // to the mapper rather than spread, so neither can ride along.
         return toAccountSummaryDTO({ plaidAccount: accountData, bank });
-      })
-    );
+      })),
+      getAccountBalanceSummary(actor),
+    ]);
 
     // An account Plaid no longer reports is dropped rather than rendered as a
     // zero balance, which would look like an emptied account.
@@ -87,6 +89,7 @@ export const getAccounts = cache(async () => {
       data: found,
       totalBanks,
       totalCurrentBalanceMinor,
+      ledgerSummary,
     });
   } catch (error) {
     console.error("An error occurred while getting the accounts:", error);
