@@ -355,21 +355,36 @@ describe("I. nullable display metadata", () => {
   });
 });
 
-describe("J. no provider-credential columns exist", () => {
-  it("neither table has a column resembling a provider secret", async () => {
+describe("J. provider credentials have one dedicated home", () => {
+  it("keeps credential columns out of metadata and every unrelated table", async () => {
     const { rows } = await pool.query<{ table_name: string; column_name: string }>(
       `SELECT table_name, column_name FROM information_schema.columns
         WHERE table_schema = 'public'`
     );
     const columns = rows.map((r) => `${r.table_name}.${r.column_name}`);
 
-    // PostgreSQL is not encryption. Moving plaintext credentials into a new
-    // datastore is not a security improvement, so they were never migrated.
-    for (const secret of [
+    const providerSecrets = [
       "access_token",
       "accesstoken",
       "funding_source_url",
       "fundingsourceurl",
+    ];
+    for (const secret of providerSecrets) {
+      const offenders = columns.filter((c) =>
+        c.toLowerCase().endsWith(`.${secret}`) &&
+        !c.startsWith("linked_account_credentials.")
+      );
+      expect(offenders, `${secret} must exist only at the credential boundary`).toEqual([]);
+    }
+
+    expect(columns.filter((c) => c.startsWith("linked_account_credentials."))).toEqual(
+      expect.arrayContaining([
+        "linked_account_credentials.access_token",
+        "linked_account_credentials.funding_source_url",
+      ])
+    );
+
+    for (const secret of [
       "processor_token",
       "processortoken",
       "dwolla_customer_url",
@@ -432,12 +447,12 @@ describe("L. timestamps are timezone aware", () => {
     // slipping in with untyped timestamps. It has to be updated deliberately
     // each time the schema grows, which is the point.
     //
-    // banking_customers, linked_accounts, transfers, ledger_accounts,
+    // banking_customers, linked_accounts, linked_account_credentials, transfers, ledger_accounts,
     // plaid_items: two each. ledger_transactions and ledger_entries are
     // append-only, so they carry created_at only. plaid_transactions records
     // when it was FIRST SEEN rather than created, so it contributes updated_at
     // alone.
-    expect(rows.length).toBe(13);
+    expect(rows.length).toBe(15);
     for (const row of rows) {
       // `timestamp without time zone` silently reinterprets values by server
       // locale, which for financial records is a correctness bug.

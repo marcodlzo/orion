@@ -462,7 +462,6 @@ describe("authentication boundary", () => {
 const ADMIN_CLIENT_ALLOWED = [
   "lib/appwrite.ts",
   "lib/repositories/accounts.repository.ts",
-  "lib/repositories/banks.repository.ts",
   "lib/repositories/users.repository.ts",
   // OPERATOR TOOLING, NOT A REQUEST PATH. Unlike the repositories above, this
   // module scopes nothing: it reads every user and every bank document, because
@@ -758,8 +757,6 @@ describe("PostgreSQL stays server-side", () => {
       .replace(/'(?:[^']|'')*'/g, "''");
 
     for (const forbidden of [
-      "access_token",
-      "funding_source_url",
       "processor_token",
       "dwolla_customer_url",
       "ssn",
@@ -1101,8 +1098,9 @@ describe("migration tooling stays out of the request path", () => {
   const RUNTIME_DB_ALLOWLIST = [
     "lib/db/repositories/transfers.repository.ts",
     "lib/db/repositories/banking-customers.repository.ts",
-    // Approved lifecycle step: actor-scoped account linking creates its bridge.
-    "lib/db/repositories/linked-accounts.repository.ts",
+    // Phase 4: actor-scoped bank reads and writes now use PostgreSQL. The raw
+    // module stores ciphertext; encryption stays in banks.repository.ts.
+    "lib/db/repositories/bank-records.repository.ts",
     "lib/db/repositories/webhook-events.repository.ts",
     "lib/db/repositories/ledger.repository.ts",
     "lib/db/repositories/holds.repository.ts",
@@ -1183,7 +1181,7 @@ describe("migration tooling stays out of the request path", () => {
       "lib/db/repositories/ledger.repository.ts",
       "lib/db/repositories/holds.repository.ts",
       "lib/db/repositories/rate-limits.repository.ts",
-      "lib/db/repositories/linked-accounts.repository.ts",
+      "lib/db/repositories/bank-records.repository.ts",
       "lib/db/repositories/account-balances.read.ts",
     ];
 
@@ -1216,8 +1214,9 @@ describe("migration tooling stays out of the request path", () => {
       // and it runs from a terminal with no actor. The test below asserts no
       // request path can reach it.
       "lib/funding/opening-allocation.ts",
-      "lib/migration/backfill.ts",
-      "lib/migration/verify.ts",
+      // Phase 4 storage boundary: owns encryption and delegates ciphertext SQL
+      // to bank-records.repository.ts.
+      "lib/repositories/banks.repository.ts",
       // THE HISTORY CUTOVER. Transfer history now comes from PostgreSQL rather
       // than the Appwrite transaction collection, so the read layer that serves
       // pages reaches the transfers repository. It is server-only and is
@@ -1225,7 +1224,6 @@ describe("migration tooling stays out of the request path", () => {
       // this test is actually about. Ownership is still proven by an
       // actor-scoped bank lookup before the id reaches any query.
       "lib/server/banks.ts",
-      "lib/services/bank-linking.service.ts",
       "lib/services/rate-limit.service.ts",
       "lib/services/settlement.service.ts",
       "lib/services/transfers.service.ts",
@@ -1573,6 +1571,8 @@ describe("migration tooling stays out of the request path", () => {
       // This is the rule being applied, not widened: every entry on this list
       // is a place that reads or writes credentials AT REST.
       "lib/migration/appwrite-source.ts",
+      "lib/migration/bank-credential-cutover.ts",
+      "lib/migration/bank-credential-verifier.ts",
       "lib/migration/credential-encryption.ts",
       "lib/repositories/banks.repository.ts",
     ]);

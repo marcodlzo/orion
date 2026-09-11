@@ -13,12 +13,19 @@ import { fileURLToPath } from "node:url";
  */
 export default defineConfig({
   resolve: {
-    alias: {
-      "@": fileURLToPath(new URL("./", import.meta.url)),
-      "server-only": fileURLToPath(
+    alias: [
+      {
+        find: /^react$/,
+        replacement: fileURLToPath(new URL(
+          "./node_modules/next/dist/server/future/route-modules/app-page/vendored/rsc/react.js",
+          import.meta.url
+        )),
+      },
+      { find: "@", replacement: fileURLToPath(new URL("./", import.meta.url)) },
+      { find: "server-only", replacement: fileURLToPath(
         new URL("./node_modules/server-only/empty.js", import.meta.url)
-      ),
-    },
+      ) },
+    ],
   },
   test: {
     environment: "node",

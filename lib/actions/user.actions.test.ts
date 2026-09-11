@@ -24,11 +24,13 @@ const {
   accountGet,
   listDocuments,
   createDocument,
+  listStoredBanks,
 } = vi.hoisted(() => ({
   cookieGet: vi.fn(),
   accountGet: vi.fn(),
   listDocuments: vi.fn(),
   createDocument: vi.fn(),
+  listStoredBanks: vi.fn(),
 }));
 
 vi.mock("next/headers", () => ({
@@ -59,6 +61,13 @@ vi.mock("../plaid", () => ({ plaidClient: {} }));
 vi.mock("../server/dwolla", () => ({
   addFundingSource: vi.fn(),
   createDwollaCustomer: vi.fn(),
+}));
+vi.mock("../db/repositories/bank-records.repository", () => ({
+  listOwnedStoredBanks: listStoredBanks,
+  findOwnedStoredBankByPublicId: vi.fn(),
+  findOwnedStoredBankByAccountId: vi.fn(),
+  findStoredCounterpartyByAccountId: vi.fn(),
+  insertStoredBank: vi.fn(),
 }));
 
 import { getLoggedInUser } from "./user.actions";
@@ -160,6 +169,21 @@ function filterValue(queries: unknown, attribute: string): string | undefined {
 function authenticateAlice(banks = [ALICE_BANK_DOC, BOB_BANK_DOC]) {
   cookieGet.mockReturnValue({ value: "session-for-alice" });
   accountGet.mockResolvedValue({ $id: "auth-alice" });
+  listStoredBanks.mockImplementation(async (actor: { userId: string }) =>
+    banks
+      .filter((bank) => (bank.userId as { $id: string }).$id === actor.userId)
+      .map((bank) => ({
+        linked_account_id: `linked-${bank.$id}`,
+        credential_id: bank.$id,
+        public_id: bank.$id,
+        owner_user_document_id: (bank.userId as { $id: string }).$id,
+        external_account_id: bank.accountId,
+        provider_item_id: bank.bankId,
+        shareable_id: bank.shareableId,
+        access_token: bank.accessToken,
+        funding_source_url: bank.fundingSourceUrl,
+      }))
+  );
 
   listDocuments.mockImplementation(
     async (_db: string, collectionId: string, queries: unknown[]) => {

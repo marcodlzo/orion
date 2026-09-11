@@ -5,13 +5,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { encryptCredential } from "../crypto/envelope";
 
-const { accountGet, listDocuments, accountsGet, readTransactions, readTransfers, readBalanceSummary } = vi.hoisted(() => ({
+const { accountGet, listDocuments, accountsGet, readTransactions, readTransfers, readBalanceSummary, listStoredBanks, findStoredBank } = vi.hoisted(() => ({
   accountGet: vi.fn(),
   listDocuments: vi.fn(),
   accountsGet: vi.fn(),
   readTransactions: vi.fn(),
   readTransfers: vi.fn(),
   readBalanceSummary: vi.fn(),
+  listStoredBanks: vi.fn(),
+  findStoredBank: vi.fn(),
 }));
 
 const sessions = new AsyncLocalStorage<string | undefined>();
@@ -40,6 +42,13 @@ vi.mock("../db/repositories/transfers.repository", () => ({
 }));
 vi.mock("../db/repositories/account-balances.read", () => ({
   getAccountBalanceSummary: readBalanceSummary,
+}));
+vi.mock("../db/repositories/bank-records.repository", () => ({
+  listOwnedStoredBanks: listStoredBanks,
+  findOwnedStoredBankByPublicId: findStoredBank,
+  findOwnedStoredBankByAccountId: vi.fn(),
+  findStoredCounterpartyByAccountId: vi.fn(),
+  insertStoredBank: vi.fn(),
 }));
 
 import { getLoggedInUser } from "../actions/user.actions";
@@ -110,6 +119,17 @@ const bank = (owner: string, suffix: string, item = suffix) => {
 };
 const banks = [bank("alice", "checking", "one"), bank("alice", "savings", "one"),
   bank("alice", "other", "two"), bank("bob", "checking", "one")];
+const asStoredBank = (b: ReturnType<typeof bank>) => ({
+  linked_account_id: `linked-${b.$id}`,
+  credential_id: b.$id,
+  public_id: b.$id,
+  owner_user_document_id: b.userId.$id,
+  external_account_id: b.accountId,
+  provider_item_id: b.bankId,
+  shareable_id: b.shareableId,
+  access_token: b.accessToken,
+  funding_source_url: b.fundingSourceUrl,
+});
 const USERS = process.env.APPWRITE_USER_COLLECTION_ID;
 const BANKS = process.env.APPWRITE_BANK_COLLECTION_ID;
 const TRANSACTIONS = process.env.APPWRITE_TRANSACTION_COLLECTION_ID;
@@ -156,6 +176,13 @@ beforeEach(() => {
     creditAllowanceMinor: 50_00,
     availableToTransferMinor: 70_00,
   });
+  listStoredBanks.mockImplementation(async (actor: { userId: string }) =>
+    banks.filter((b) => b.userId.$id === actor.userId).map(asStoredBank)
+  );
+  findStoredBank.mockImplementation(async (actor: { userId: string }, id: string) => {
+    const found = banks.find((b) => b.userId.$id === actor.userId && b.$id === id);
+    return found ? asStoredBank(found) : null;
+  });
 });
 
 async function navigation() {
@@ -171,7 +198,9 @@ describe("render-path round trips and isolation", () => {
     const result = await render("alice", navigation);
     expect(accountGet).toHaveBeenCalledTimes(1);
     expect(callsTo(USERS)).toHaveLength(1);
-    expect(callsTo(BANKS)).toHaveLength(2); // owned list + selected bank proof
+    expect(callsTo(BANKS)).toHaveLength(0); // Appwrite bank reads are gone
+    expect(listStoredBanks).toHaveBeenCalledTimes(1);
+    expect(findStoredBank).toHaveBeenCalledTimes(1);
     // ZERO, and that is the cutover. Transfer history used to be two
     // unpaginated Appwrite reads, one for sent and one for received; it is now
     // a single paginated PostgreSQL query across both sides of the row.
@@ -202,7 +231,8 @@ describe("render-path round trips and isolation", () => {
 
   it("deduplicates simultaneous account-list reads", async () => {
     await render("alice", () => Promise.all([getAccounts(), getAccounts()]));
-    expect(callsTo(BANKS)).toHaveLength(1);
+    expect(callsTo(BANKS)).toHaveLength(0);
+    expect(listStoredBanks).toHaveBeenCalledTimes(1);
     expect(accountsGet).toHaveBeenCalledTimes(2);
   });
 
@@ -251,7 +281,10 @@ describe("render-path round trips and isolation", () => {
     expect(accountsGet).not.toHaveBeenCalled();
     expect(readTransactions).not.toHaveBeenCalled();
     expect(callsTo(TRANSACTIONS)).toHaveLength(0);
-    expect(queryValue(callsTo(BANKS)[0][2], "userId")).toBe("user-alice");
+    expect(findStoredBank).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "user-alice" }),
+      "bank-bob-checking"
+    );
   });
 
   it("still checks a foreign URL id after the actor's own account list has loaded", async () => {
@@ -264,7 +297,9 @@ describe("render-path round trips and isolation", () => {
     expect(accountsGet).not.toHaveBeenCalled();
     expect(readTransactions).not.toHaveBeenCalled();
     expect(callsTo(TRANSACTIONS)).toHaveLength(0);
-    expect(callsTo(BANKS)).toHaveLength(2);
+    expect(callsTo(BANKS)).toHaveLength(0);
+    expect(listStoredBanks).toHaveBeenCalledTimes(1);
+    expect(findStoredBank).toHaveBeenCalledTimes(1);
   });
 
   it("starts both history sources while Plaid is still pending, after ownership", async () => {
@@ -282,7 +317,8 @@ describe("render-path round trips and isolation", () => {
         expect(readTransactions).toHaveBeenCalledTimes(1);
         expect(readTransfers).toHaveBeenCalledTimes(1);
       });
-      expect(callsTo(BANKS)).toHaveLength(1);
+      expect(callsTo(BANKS)).toHaveLength(0);
+      expect(findStoredBank).toHaveBeenCalledTimes(1);
     } finally {
       release();
       await pending;

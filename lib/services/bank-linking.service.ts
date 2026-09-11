@@ -3,11 +3,9 @@ import "server-only";
 import type { Actor } from "../auth/actor";
 import { InfrastructureError } from "../auth/errors";
 import { createBankForActor, getOwnedBankByAccountId } from "../repositories/banks.repository";
-import { withTransaction } from "../db/pool";
-import { ensureBankingCustomer } from "../db/repositories/banking-customers.repository";
-import { upsertLinkedAccount } from "../db/repositories/linked-accounts.repository";
 
-type BankInput = Parameters<typeof createBankForActor>[1];
+type BankInput = Pick<Parameters<typeof createBankForActor>[1],
+  "bankId" | "accountId" | "accessToken" | "fundingSourceUrl" | "shareableId">;
 export type LinkedAccountMetadata = {
   displayName: string;
   officialName: string | null;
@@ -17,11 +15,7 @@ export type LinkedAccountMetadata = {
   currency: string | null;
 };
 
-/** Both identities come from the session; metadata comes from accountsGet.
- * Appwrite and PostgreSQL cannot share a transaction. A failed mirror is
- * reported, and retry reuses the owned document to repair the missing bridge.
- * No credential is copied into PostgreSQL.
- */
+/** Both identities come from the session; metadata comes from accountsGet. */
 export async function linkBankForActor(actor: Actor, input: BankInput, metadata: LinkedAccountMetadata) {
   if (metadata.currency !== "USD" || metadata.accountType !== "depository") {
     throw new InfrastructureError("Only USD depository accounts can be linked");
@@ -30,26 +24,14 @@ export async function linkBankForActor(actor: Actor, input: BankInput, metadata:
   if (existing && existing.bankId !== input.bankId) {
     throw new InfrastructureError("The existing account belongs to a different Item");
   }
-  const bank = existing ?? await createBankForActor(actor, input);
-  try {
-    await withTransaction(async (client) => {
-      const { row: customer } = await ensureBankingCustomer({
-        appwriteAuthId: actor.authId,
-        appwriteUserDocumentId: actor.userId,
-      }, client);
-      await upsertLinkedAccount({
-        customerId: customer.id,
-        legacyAppwriteBankDocumentId: bank.$id,
-        externalAccountId: bank.accountId,
-        provider: "plaid",
-        ...metadata,
-        currency: "USD",
-        metadataKnown: true,
-      }, client);
-    });
-  } catch {
-    // Do not expose driver errors, which can contain the offending row.
-    throw new InfrastructureError("Bank linked, but its banking record could not be saved");
-  }
-  return bank;
+  if (existing) return existing;
+
+  return createBankForActor(actor, {
+    ...input,
+    displayName: metadata.displayName,
+    officialName: metadata.officialName,
+    mask: metadata.mask,
+    accountType: metadata.accountType,
+    accountSubtype: metadata.accountSubtype,
+  });
 }
