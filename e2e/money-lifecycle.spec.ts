@@ -23,9 +23,9 @@ let transferRequest: { url: string; body: string; headers: Record<string, string
 let transferId: string;
 let durable: unknown;
 const errors: string[] = [];
-function probe(mode: string, bankId: string) {
+function probe(mode: string, accountId: string) {
   return JSON.parse(execFileSync(process.execPath, ["--import", "tsx", "--import", "./scripts/loader/server-only-alias.mjs",
-    "e2e/item-probe.ts", mode, bankId], { encoding: "utf8", timeout: 90_000 }));
+    "e2e/item-probe.ts", mode, accountId], { encoding: "utf8", timeout: 90_000 }));
 }
 
 test.beforeAll(async ({ browser }) => {
@@ -74,13 +74,10 @@ test.afterAll(async () => {
           }).catch(() => undefined);
         }
       }
-      for (const bank of await ownedBanks()) {
-        await database.deleteDocument({
-          databaseId: process.env.APPWRITE_DATABASE_ID!,
-          collectionId: process.env.APPWRITE_BANK_COLLECTION_ID!,
-          documentId: bank.$id,
-        });
-      }
+      // NO BANK DOCUMENTS TO DELETE. Phase 4 moved bank records and their
+      // credentials into PostgreSQL, and the test database is truncated between
+      // runs, so the rows this test created go with it. The Appwrite bank
+      // collection is legacy data that this suite no longer writes.
       const user = await database.getDocument({
         databaseId: process.env.APPWRITE_DATABASE_ID!,
         collectionId: process.env.APPWRITE_USER_COLLECTION_ID!,
@@ -101,10 +98,44 @@ test.afterAll(async () => {
   await pool.end();
 });
 
+/**
+ * The actor's banks, FROM POSTGRESQL.
+ *
+ * This read the Appwrite bank collection until the Phase 4 cutover stopped
+ * writing it, at which point the helper silently returned an empty list forever
+ * and the link test waited out its full 90-second poll on a flow that had
+ * actually succeeded. The suite had not run since the cutover — the Appwrite
+ * project was paused — so nothing caught it.
+ *
+ * `public_id` is what the application exposes as a bank's id: the legacy
+ * Appwrite document id where one exists, otherwise the row's own UUID. The
+ * shape below matches what the Appwrite documents used to provide, so every
+ * caller is unchanged.
+ */
 async function ownedBanks() {
-  const result = await database.listDocuments({ databaseId: process.env.APPWRITE_DATABASE_ID!,
-    collectionId: process.env.APPWRITE_BANK_COLLECTION_ID!, queries: [Query.equal("userId", [userDocumentId])] });
-  return result.documents;
+  const { rows } = await pool.query<{
+    public_id: string;
+    external_account_id: string;
+    provider_item_id: string | null;
+    shareable_id: string | null;
+    display_name: string;
+  }>(
+    `SELECT COALESCE(a.legacy_appwrite_bank_document_id, a.id::text) AS public_id,
+            a.external_account_id, a.provider_item_id, a.shareable_id, a.display_name
+       FROM linked_accounts a
+       JOIN banking_customers c ON c.id = a.customer_id
+      WHERE c.appwrite_user_document_id = $1
+      ORDER BY a.created_at, a.id`,
+    [userDocumentId]
+  );
+
+  return rows.map((row) => ({
+    $id: row.public_id,
+    accountId: row.external_account_id,
+    bankId: row.provider_item_id ?? "",
+    shareableId: row.shareable_id ?? "",
+    displayName: row.display_name,
+  }));
 }
 
 test("new signup reaches the dashboard without a bank", async () => {
@@ -186,7 +217,7 @@ test("sign in and link every sandbox depository account through Plaid Link", asy
     .catch(() => undefined);
   await expect.poll(async () => (await ownedBanks()).length, { timeout: 90_000 }).toBeGreaterThanOrEqual(2);
   const banks = await ownedBanks();
-  const provider = probe("accounts", banks[0].$id) as {
+  const provider = probe("accounts", banks[0].accountId) as {
     accounts: Array<{ id: string; subtype: string | null }>;
   };
 
@@ -218,12 +249,12 @@ test("operator sync persists transactions and resumes from the stored cursor", a
   const banks = await ownedBanks();
   const itemId = banks[0].bankId;
   await expect.poll(async () => {
-    const outcome = probe("sync", banks[0].$id);
+    const outcome = probe("sync", banks[0].accountId);
     expect(outcome.status).toBe("synced");
     return (await pool.query("SELECT count(*)::int AS n FROM plaid_transactions WHERE item_id=$1", [itemId])).rows[0].n;
   }, { timeout: 120_000, intervals: [3000, 5000] }).toBeGreaterThan(0);
   const before = await pool.query("SELECT plaid_transaction_id,amount_minor FROM plaid_transactions WHERE item_id=$1 ORDER BY plaid_transaction_id", [itemId]);
-  const outcome = probe("sync", banks[0].$id);
+  const outcome = probe("sync", banks[0].accountId);
   expect(outcome).toMatchObject({ status: "synced", resumed: true });
   const item = await pool.query("SELECT status,cursor,last_error_code FROM plaid_items WHERE item_id=$1", [itemId]);
   expect(item.rows[0].status).toBe("healthy");

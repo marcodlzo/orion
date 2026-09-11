@@ -4,6 +4,27 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { cache } from "react";
 
+/**
+ * Per-render memoisation that DEGRADES OUTSIDE A RENDER.
+ *
+ * `cache` exists only in React's server runtime. Next aliases `react` to that
+ * build, so it is a function inside the application — but an operator script is
+ * plain Node, where the standard package exports no `cache` and importing this
+ * module died with "cache is not a function" before reaching any query.
+ *
+ * That mattered once the bank store moved to PostgreSQL: scripts that need a
+ * DECRYPTED credential must come through this boundary, because it is the only
+ * place decryption happens. Making them reimplement it would put a second
+ * reader of the keyring in `scripts/`, which is exactly what the single-boundary
+ * rule exists to prevent.
+ *
+ * Falling back to the function itself is correct rather than a compromise:
+ * outside a request there is no request to scope a memo to, and an operator
+ * script runs one pass and exits.
+ */
+const perRender: <T extends (...args: never[]) => unknown>(fn: T) => T =
+  typeof cache === "function" ? cache : (fn) => fn;
+
 import type { Actor } from "../auth/actor";
 import { InfrastructureError } from "../auth/errors";
 import { decryptCredential, encryptCredential } from "../crypto/envelope";
@@ -50,7 +71,7 @@ export async function getOwnedBanks(actor: Actor): Promise<BankRecord[]> {
   return readOwnedBanks(actor);
 }
 
-const readOwnedBanks = cache(async (actor: Actor): Promise<BankRecord[]> => {
+const readOwnedBanks = perRender(async (actor: Actor): Promise<BankRecord[]> => {
   try {
     return (await listOwnedStoredBanks(actor)).map(decryptBankRecord);
   } catch (error) {
@@ -65,7 +86,7 @@ export async function getOwnedBankByDocumentId(
   return readOwnedBankByDocumentId(actor, documentId);
 }
 
-const readOwnedBankByDocumentId = cache(async (
+const readOwnedBankByDocumentId = perRender(async (
   actor: Actor,
   documentId: string
 ): Promise<BankRecord | null> => {
