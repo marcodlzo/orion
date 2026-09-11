@@ -4,6 +4,23 @@ name: Sandbox browser tests
 # Plaid/Dwolla sandbox credentials in the sandbox-e2e GitHub environment.
 on:
   workflow_dispatch:
+  # NIGHTLY, NOT PER-COMMIT.
+  #
+  # Per-commit is wrong for this suite: every run signs up a real Appwrite user,
+  # links a real Plaid Item and creates a real Dwolla customer. Dwolla customers
+  # cannot be deleted, only deactivated, so per-commit would accumulate
+  # provider-side records forever.
+  #
+  # Manual-only was also wrong, which is why this exists. A suite nothing runs
+  # is a suite that rots, and this one is the only thing that catches the class
+  # of defect the unit suites structurally cannot: an empty-state crash, a
+  # silent link failure, a form whose labels all point at the first input.
+  #
+  # Nightly is the compromise — recent enough that a break is attributable to a
+  # small range of commits, rare enough that provider residue stays bounded.
+  schedule:
+    - cron: "17 3 * * *" # 03:17 UTC. Off the hour, so it does not queue behind
+                         # every other project's midnight cron.
 
 permissions:
   contents: read
@@ -54,5 +71,29 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run build
       - run: npm run test:e2e
+
+      # ALWAYS, even when the suite failed. A run that fails partway leaves the
+      # Appwrite records it had already created, and those are what the
+      # migration source reads — residue does not stay cosmetic, it becomes
+      # rows a backfill would migrate.
+      #
+      # The suite tears down after itself too; this is the backstop for the runs
+      # that do not reach their own teardown.
+      - name: Sweep end-to-end residue
+        if: always()
+        run: npm run e2e:cleanup:commit
+
+      # Fail the job if anything survived the sweep, rather than reporting clean
+      # and leaving it for somebody to find in a backfill dry run months later.
+      - name: Assert no residue survived
+        if: always()
+        run: |
+          output="$(npm run e2e:cleanup --silent)"
+          echo "$output"
+          if ! echo "$output" | grep -qE "test users +0"; then
+            echo "::error::End-to-end residue survived the sweep"
+            exit 1
+          fi
+
       # No browser trace, storage-state file, or screenshot uploads: they can
       # contain session secrets and provider credentials from Link exchanges.
