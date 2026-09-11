@@ -35,6 +35,7 @@ import {
   findOwnedStoredBankByPublicId,
   findStoredCounterpartyByAccountId,
   insertStoredBank,
+  listAllStoredBanks,
   listOwnedStoredBanks,
   type StoredBankRow,
 } from "../db/repositories/bank-records.repository";
@@ -65,6 +66,32 @@ function decryptBankRecord(row: StoredBankRow): BankRecord {
     shareableId: row.shareable_id,
     userId: { $id: row.owner_user_document_id },
   };
+}
+
+/**
+ * EVERY bank, decrypted, scoped to nobody. OPERATOR TOOLING ONLY.
+ *
+ * `npm run plaid:sync` has to visit each Plaid Item once, and after the Phase 4
+ * cutover the credentials it needs live here. It read the Appwrite collection
+ * until that stopped being written, at which point the sweep silently found no
+ * banks for anything linked since.
+ *
+ * It lives at THIS boundary rather than in the script because decryption
+ * happens in exactly one place. Giving an operator script the keyring instead
+ * would be a second reader of `CREDENTIAL_ENCRYPTION_KEYS`, which is the thing
+ * that would let a caller get the record binding wrong and silently disable the
+ * protection against a moved ciphertext.
+ *
+ * NEVER call this from a request path. It returns every customer's provider
+ * credentials; an actor-scoped read is `getOwnedBanks`. An architecture test
+ * asserts only `scripts/` reaches it.
+ */
+export async function listAllBanksForOperator(): Promise<BankRecord[]> {
+  try {
+    return (await listAllStoredBanks()).map(decryptBankRecord);
+  } catch (error) {
+    throw new InfrastructureError("Failed to read linked bank records", { cause: error });
+  }
 }
 
 export async function getOwnedBanks(actor: Actor): Promise<BankRecord[]> {

@@ -49,6 +49,26 @@ JOIN linked_account_credentials k ON k.linked_account_id = a.id`;
 const ownership = `c.appwrite_auth_id = $1
   AND c.appwrite_user_document_id = $2`;
 
+/**
+ * EVERY stored bank, scoped to nobody. OPERATOR TOOLING ONLY.
+ *
+ * Correct for a sweep that must touch each Plaid Item once, and catastrophic in
+ * a request: it returns every customer's credential row. The rows are
+ * ciphertext — decryption happens at `lib/repositories/banks.repository.ts` and
+ * nowhere else — but a caller that can list them all can decrypt them all by
+ * going one layer up.
+ *
+ * An architecture test asserts only `scripts/` reaches the decrypting wrapper.
+ */
+export async function listAllStoredBanks(): Promise<StoredBankRow[]> {
+  const { rows } = await run<StoredBankRow>(
+    undefined,
+    `${SELECT} ORDER BY a.created_at, a.id`,
+    []
+  );
+  return rows;
+}
+
 export async function listOwnedStoredBanks(actor: Actor): Promise<StoredBankRow[]> {
   const { rows } = await run<StoredBankRow>(
     undefined,

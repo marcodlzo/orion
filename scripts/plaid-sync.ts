@@ -26,7 +26,7 @@ import { describeThrown } from "../lib/migration/report-format";
 // The sanctioned unscoped reader. It reads every bank document with the admin
 // client and scopes nothing — correct for an operator sweep, and the reason this
 // file may import it while no request path may.
-import { readAllLegacyBanks } from "../lib/migration/appwrite-source";
+import { listAllBanksForOperator } from "../lib/repositories/banks.repository";
 import { syncPlaidItem } from "../lib/plaid-sync/sync";
 
 async function main(): Promise<number> {
@@ -41,16 +41,16 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const scan = await readAllLegacyBanks();
-
-  // Completeness first. A sweep that silently read half the collection would
-  // report every unread item as "fine".
-  if (scan.scanned !== scan.reportedTotal) {
-    console.error(
-      `Incomplete read: scanned ${scan.scanned} of ${scan.reportedTotal} bank documents. Refusing to report on a partial sweep.`
-    );
-    return 2;
-  }
+  // FROM POSTGRESQL. This read the Appwrite collection until the Phase 4
+  // cutover stopped writing it, at which point the sweep silently found no
+  // banks for anything linked since — a sweep reporting "nothing to sync"
+  // looks identical to a sweep with nothing to do.
+  //
+  // No completeness check is needed any more. The Appwrite read paginated and
+  // could return half a collection while reporting the full total, which is
+  // what that guard existed for. One SQL statement either returns the rows or
+  // raises.
+  const scan = { documents: await listAllBanksForOperator() };
 
   if (scan.documents.length === 0) {
     console.log("No linked banks. Nothing to sync.");

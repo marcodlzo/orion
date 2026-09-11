@@ -1252,6 +1252,30 @@ describe("migration tooling stays out of the request path", () => {
     expect(reachable).toEqual([]);
   });
 
+  it("only scripts reach the unscoped bank reader", () => {
+    // `listAllBanksForOperator` returns EVERY customer's provider credentials,
+    // decrypted. It exists because the Plaid sweep must visit each Item once and
+    // the credentials moved to PostgreSQL in the Phase 4 cutover, and it lives
+    // at the storage boundary because decryption happens in exactly one place —
+    // handing an operator script the keyring instead would be a second reader
+    // of it.
+    //
+    // The actor-scoped read is `getOwnedBanks`. A request path reaching this one
+    // would turn "show me my banks" into "show me everyone's credentials", and
+    // nothing in the type system distinguishes them.
+    const callers = Array.from(graph.values())
+      .filter((m) => !m.file.endsWith(".test.ts"))
+      .filter((m) => m.file !== "lib/repositories/banks.repository.ts")
+      .filter((m) => m.code.includes("listAllBanksForOperator"))
+      .map((m) => m.file)
+      .sort();
+
+    // Non-vacuous by construction: the sweep does call it, so an expression
+    // matching nothing would fail here rather than pass quietly.
+    expect(callers.length).toBeGreaterThan(0);
+    expect(callers.filter((f) => !f.startsWith("scripts/"))).toEqual([]);
+  });
+
   it("no script is reachable from a request path", () => {
     // The other half of the claim above. Listing a script as a permitted
     // importer is only safe while nothing a request can reach imports a script,
