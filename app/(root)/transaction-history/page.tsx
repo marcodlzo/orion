@@ -4,6 +4,7 @@ import TransactionsTable from '@/components/TransactionsTable';
 import { getAccount, getAccounts } from '@/lib/server/banks';
 import { formatMinorUnits } from '@/lib/domain/money';
 import NoLinkedAccounts from '@/components/NoLinkedAccounts';
+import AccountSelector from '@/components/AccountSelector';
 import React from 'react'
 
 const TransactionHistory = async ({ searchParams: { id, page }}:SearchParamProps) => {
@@ -56,6 +57,18 @@ const TransactionHistory = async ({ searchParams: { id, page }}:SearchParamProps
       </div>
 
       <div className="space-y-6">
+        {/*
+          Without this the page showed the first account and offered no way to
+          reach the others. A customer with two banks could see only one of
+          them, and the second was reachable only by knowing its id and editing
+          the address bar.
+        */}
+        <AccountSelector
+          accounts={accountsData}
+          selectedItemId={appwriteItemId}
+          basePath="/transaction-history"
+        />
+
         <div className="transactions-account">
           <div className="flex flex-col gap-2">
             <h2 className="text-18 font-bold text-white">{account?.data.name}</h2>
