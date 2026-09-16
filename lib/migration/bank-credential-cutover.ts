@@ -84,9 +84,9 @@ export async function migrateBankCredentials(
 
         await client.query(
           `UPDATE linked_accounts
-              SET provider_item_id = $2, shareable_id = $3
+              SET provider_item_id = $2
             WHERE id = $1`,
-          [linked.rows[0].id, bank.bankId, bank.shareableId]
+          [linked.rows[0].id, bank.bankId]
         );
       }
 

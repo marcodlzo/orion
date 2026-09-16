@@ -114,7 +114,7 @@ const bank = (owner: string, suffix: string, item = suffix) => {
     plainAccessToken: `provider-credential-${owner}-${item}`,
     accessToken: stored($id, "accessToken", `provider-credential-${owner}-${item}`),
     fundingSourceUrl: stored($id, "fundingSourceUrl", "private-funding-source"),
-    shareableId: `share-${owner}-${suffix}`,
+    shareToken: `${owner === "alice" ? "a" : "b"}${suffix === "checking" ? "1" : suffix === "savings" ? "2" : "3"}`.padEnd(32, "0"),
   };
 };
 const banks = [bank("alice", "checking", "one"), bank("alice", "savings", "one"),
@@ -126,7 +126,7 @@ const asStoredBank = (b: ReturnType<typeof bank>) => ({
   owner_user_document_id: b.userId.$id,
   external_account_id: b.accountId,
   provider_item_id: b.bankId,
-  shareable_id: b.shareableId,
+  share_token: b.shareToken,
   access_token: b.accessToken,
   funding_source_url: b.fundingSourceUrl,
 });

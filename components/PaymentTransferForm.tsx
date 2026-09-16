@@ -8,6 +8,7 @@ import { useForm } from "react-hook-form";
 import * as z from "zod";
 
 import { initiateTransfer } from "@/lib/actions/transfer.actions";
+import { SHARE_TOKEN_PATTERN } from "@/lib/domain/share-token";
 
 import { BankDropdown } from "./BankDropdown";
 import { Button } from "./ui/button";
@@ -23,7 +24,7 @@ import {
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 
-const formSchema = z.object({
+export const paymentTransferFormSchema = z.object({
   email: z.string().email("Invalid email address"),
   name: z.string().min(4, "Transfer note is too short"),
   // Was `.min(4)`, which validated the STRING LENGTH — it rejected "10" while
@@ -36,7 +37,9 @@ const formSchema = z.object({
     // "greater than zero" without arithmetic: any non-zero digit anywhere.
     .refine((v) => /[1-9]/.test(v), "Amount must be greater than zero"),
   senderBank: z.string().min(4, "Please select a valid bank account"),
-  shareableId: z.string().min(8, "Please select a valid shareable Id"),
+  shareToken: z
+    .string()
+    .regex(SHARE_TOKEN_PATTERN, "Enter a valid 32-character share token"),
 });
 
 const PaymentTransferForm = ({ accounts }: PaymentTransferFormProps) => {
@@ -56,14 +59,14 @@ const PaymentTransferForm = ({ accounts }: PaymentTransferFormProps) => {
    */
   const idempotencyKey = useRef<string | null>(null);
 
-  const form = useForm<z.infer<typeof formSchema>>({
-    resolver: zodResolver(formSchema),
+  const form = useForm<z.infer<typeof paymentTransferFormSchema>>({
+    resolver: zodResolver(paymentTransferFormSchema),
     defaultValues: {
       name: "",
       email: "",
       amount: "",
       senderBank: "",
-      shareableId: "",
+      shareToken: "",
     },
   });
 
@@ -81,7 +84,7 @@ const PaymentTransferForm = ({ accounts }: PaymentTransferFormProps) => {
    * `isLoading` still disables the button, but it is UX — it does nothing about
    * a second tab, a refresh, or a replayed request. The key is the guarantee.
    */
-  const submit = async (data: z.infer<typeof formSchema>) => {
+  const submit = async (data: z.infer<typeof paymentTransferFormSchema>) => {
     if (isLoading) return;
     setIsLoading(true);
 
@@ -93,7 +96,7 @@ const PaymentTransferForm = ({ accounts }: PaymentTransferFormProps) => {
       await initiateTransfer({
         idempotencyKey: idempotencyKey.current,
         senderBankId: data.senderBank,
-        recipientReference: data.shareableId,
+        recipientReference: data.shareToken,
         amount: data.amount,
         note: data.name,
         recipientEmail: data.email,
@@ -210,12 +213,12 @@ const PaymentTransferForm = ({ accounts }: PaymentTransferFormProps) => {
 
         <FormField
           control={form.control}
-          name="shareableId"
+          name="shareToken"
           render={({ field }) => (
             <FormItem className="border-t border-gray-200">
               <div className="payment-transfer_form-item pb-5 pt-6">
                 <FormLabel className="text-14 w-full max-w-[280px] font-medium text-gray-700">
-                  Receiver&apos;s Plaid Sharable Id
+                  Receiver&apos;s Share Token
                 </FormLabel>
                 <div className="flex w-full flex-col">
                   <FormControl>

@@ -13,7 +13,6 @@ export type StoredBankRow = {
   owner_user_document_id: string;
   external_account_id: string;
   provider_item_id: string;
-  shareable_id: string;
   share_token: string;
   access_token: string;
   funding_source_url: string;
@@ -40,7 +39,6 @@ const SELECT = `SELECT
   c.appwrite_user_document_id AS owner_user_document_id,
   a.external_account_id,
   a.provider_item_id,
-  a.shareable_id,
   a.share_token,
   k.access_token,
   k.funding_source_url
@@ -150,7 +148,6 @@ export async function insertStoredBank(
     customerId: string;
     accountId: string;
     itemId: string;
-    shareableId: string;
     shareToken: string;
     accessToken: string;
     fundingSourceUrl: string;
@@ -166,12 +163,12 @@ export async function insertStoredBank(
     client,
     `INSERT INTO linked_accounts (
        id, customer_id, legacy_appwrite_bank_document_id, external_account_id,
-       provider, provider_item_id, shareable_id, share_token, display_name,
+       provider, provider_item_id, share_token, display_name,
        official_name, mask, account_type, account_subtype, currency
-     ) VALUES ($1, $2, NULL, $3, 'plaid', $4, $5, $6, $7, $8, $9, $10, $11, 'USD')`,
+     ) VALUES ($1, $2, NULL, $3, 'plaid', $4, $5, $6, $7, $8, $9, $10, 'USD')`,
     [
       input.linkedAccountId, input.customerId, input.accountId, input.itemId,
-      input.shareableId, input.shareToken, input.displayName, input.officialName,
+      input.shareToken, input.displayName, input.officialName,
       input.mask, input.accountType, input.accountSubtype,
     ]
   );

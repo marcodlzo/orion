@@ -16,7 +16,6 @@ const INPUT = {
   accountId: "acct-1",
   accessToken: "provider-credential-under-test",
   fundingSourceUrl: "https://funding.example.invalid/sources/1",
-  shareableId: "YWNjdC0x",
 };
 
 const METADATA: LinkedAccountMetadata = {
@@ -118,7 +117,6 @@ describe("linking a bank in PostgreSQL", () => {
       "provider",
       "provider_item_id",
       "share_token",
-      "shareable_id",
       "updated_at",
     ]);
 

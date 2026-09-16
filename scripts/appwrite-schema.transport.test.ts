@@ -59,7 +59,7 @@ describe("native TablesDB schema transport", () => {
   it("normalizes native relatedTable and columns fields and checks without writing", async () => {
     const summary = await synchronizeSchema({ apply: false });
     expect(summary).toEqual({
-      createdAttributes: 0, createdIndexes: 0, existingAttributes: 25,
+      createdAttributes: 0, createdIndexes: 0, existingAttributes: 24,
       existingIndexes: 4, missingAttributes: 0, missingIndexes: 0,
     });
     expect(transport).toHaveBeenCalledTimes(6);
@@ -82,7 +82,7 @@ describe("native TablesDB schema transport", () => {
     bankTable.indexes = [];
     const summary = await synchronizeSchema({ apply: true });
     expect(summary).toMatchObject({
-      createdAttributes: 2, createdIndexes: 1, existingAttributes: 25, existingIndexes: 4,
+      createdAttributes: 2, createdIndexes: 1, existingAttributes: 24, existingIndexes: 4,
     });
     const writes = transport.mock.calls.filter(([method]) => method === "post");
     expect(writes).toHaveLength(3);

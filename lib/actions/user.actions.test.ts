@@ -67,6 +67,7 @@ vi.mock("../db/repositories/bank-records.repository", () => ({
   findOwnedStoredBankByPublicId: vi.fn(),
   findOwnedStoredBankByAccountId: vi.fn(),
   findStoredCounterpartyByAccountId: vi.fn(),
+  findStoredCounterpartyByShareToken: vi.fn(),
   insertStoredBank: vi.fn(),
 }));
 
@@ -115,7 +116,7 @@ const ALICE_BANK_DOC = {
     "fundingSourceUrl",
     "https://funding.example.invalid/sources/alice"
   ),
-  shareableId: "cGxhaWQtYWNjb3VudC1hbGljZQ==",
+  shareToken: "11111111111111111111111111111111",
 };
 
 const BOB_BANK_DOC = {
@@ -129,7 +130,7 @@ const BOB_BANK_DOC = {
     "fundingSourceUrl",
     "https://funding.example.invalid/sources/bob"
   ),
-  shareableId: "cGxhaWQtYWNjb3VudC1ib2I=",
+  shareToken: "22222222222222222222222222222222",
 };
 
 const USER_COLLECTION = process.env.APPWRITE_USER_COLLECTION_ID;
@@ -179,7 +180,7 @@ function authenticateAlice(banks = [ALICE_BANK_DOC, BOB_BANK_DOC]) {
         owner_user_document_id: (bank.userId as { $id: string }).$id,
         external_account_id: bank.accountId,
         provider_item_id: bank.bankId,
-        shareable_id: bank.shareableId,
+        share_token: bank.shareToken,
         access_token: bank.accessToken,
         funding_source_url: bank.fundingSourceUrl,
       }))

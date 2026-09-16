@@ -1,8 +1,6 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  encryptId,
-  decryptId,
   extractCustomerIdFromUrl,
   countTransactionCategories,
   removeSpecialCharacters,
@@ -31,24 +29,6 @@ import {
  * asserted in lib/domain/money.test.ts — including the cases these tests
  * existed to record.
  */
-
-describe("encryptId / decryptId", () => {
-  it("round-trips a value", () => {
-    expect(decryptId(encryptId("account-123"))).toBe("account-123");
-  });
-
-  // DEFECT — these are named for encryption but are base64 encoding. The
-  // "shareable id" a user hands out is a reversible encoding of their raw
-  // Plaid account_id. Renaming and replacing them is authorization-milestone
-  // work; this test documents that anyone can decode it.
-  it("DEFECT: is base64 encoding, not encryption — trivially reversible", () => {
-    const plaidAccountId = "X7LMJkE5vnskJBxwPeXaUWDBxAyZXwi9DNEWJ";
-    const shareable = encryptId(plaidAccountId);
-
-    expect(shareable).toBe(Buffer.from(plaidAccountId).toString("base64"));
-    expect(Buffer.from(shareable, "base64").toString()).toBe(plaidAccountId);
-  });
-});
 
 describe("extractCustomerIdFromUrl", () => {
   it("returns the last path segment of a Dwolla customer URL", () => {

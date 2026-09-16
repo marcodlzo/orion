@@ -18,7 +18,7 @@ import { toMinorUnits } from "../plaid-sync/adapter";
  *   mask             BankCard, transaction-history detail
  *   type / subtype   BankInfo styling
  *   currentBalanceMinor  BankCard, BankInfo, BankDropdown, DoughnutChart, totals
- *   shareableId      the recipient reference a user copies to be paid
+ *   shareToken       the recipient reference a user copies to be paid
  *
  * Dropped because no rendering path reads them:
  *   availableBalance, institutionId, bankId (the Plaid item id)
@@ -28,10 +28,9 @@ import { toMinorUnits } from "../plaid-sync/adapter";
  *   fundingSourceUrl   Dwolla capability — possession is sufficient to move money
  *   userId             raw Appwrite relationship document
  *
- * `shareableId` is intentionally included: it is the identifier a user hands
- * out to receive money. It is base64 of the Plaid account id rather than an
- * opaque token, which is a separate catalogued defect — encoding is not
- * encryption — but it is not a credential.
+ * `shareToken` is intentionally included: it is the unguessable identifier a
+ * user hands out to receive money. It is a payable-by-anyone reference, not a
+ * credential that authorizes debits.
  */
 export type AccountSummaryDTO = {
   id: string;
@@ -50,7 +49,7 @@ export type AccountSummaryDTO = {
    * function the sync uses, and no float exists past that point.
    */
   currentBalanceMinor: number;
-  shareableId: string;
+  shareToken: string;
 };
 
 export const ACCOUNT_SUMMARY_DTO_FIELDS = [
@@ -62,7 +61,7 @@ export const ACCOUNT_SUMMARY_DTO_FIELDS = [
   "type",
   "subtype",
   "currentBalanceMinor",
-  "shareableId",
+  "shareToken",
 ] as const;
 
 const str = (value: unknown): string => (typeof value === "string" ? value : "");
@@ -104,6 +103,6 @@ export function toAccountSummaryDTO(input: {
     type: str(a.type),
     subtype: str(a.subtype),
     currentBalanceMinor: balanceMinor(balances.current),
-    shareableId: str(b.shareableId),
+    shareToken: str(b.shareToken),
   };
 }

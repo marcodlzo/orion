@@ -5,7 +5,7 @@ import { InfrastructureError } from "../auth/errors";
 import { createBankForActor, getOwnedBankByAccountId } from "../repositories/banks.repository";
 
 type BankInput = Pick<Parameters<typeof createBankForActor>[1],
-  "bankId" | "accountId" | "accessToken" | "fundingSourceUrl" | "shareableId">;
+  "bankId" | "accountId" | "accessToken" | "fundingSourceUrl">;
 export type LinkedAccountMetadata = {
   displayName: string;
   officialName: string | null;

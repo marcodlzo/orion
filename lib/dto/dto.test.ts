@@ -61,7 +61,7 @@ const RAW_BANK = {
   bankId: "plaid-item-1",
   accessToken: "REDACTED-PLAID-ACCESS-TOKEN",
   fundingSourceUrl: "https://api-sandbox.dwolla.invalid/funding-sources/REDACTED",
-  shareableId: "cGxhaWQtYWNjb3VudC0x",
+  shareToken: "0123456789abcdef0123456789abcdef",
 };
 
 const RAW_PLAID_ACCOUNT = {
@@ -178,7 +178,7 @@ describe("AccountSummaryDTO", () => {
       // taken straight from Plaid's JSON and then summed across accounts, so
       // the representation error compounded once per linked account.
       currentBalanceMinor: 11000,
-      shareableId: "cGxhaWQtYWNjb3VudC0x",
+      shareToken: "0123456789abcdef0123456789abcdef",
     });
   });
 

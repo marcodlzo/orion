@@ -181,13 +181,8 @@ export function extractCustomerIdFromUrl(url: string) {
   return customerId;
 }
 
-export function encryptId(id: string) {
-  return btoa(id);
-}
-
-export function decryptId(id: string) {
-  return atob(id);
-}
+// REMOVED: encryptId / decryptId. Base64 is encoding, not encryption; recipient
+// references are now random share tokens and reveal no Plaid account id.
 
 /**
  * REMOVED IN MILESTONE 11: getTransactionStatus.

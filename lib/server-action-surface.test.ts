@@ -323,6 +323,7 @@ const MUST_STAY_INTERNAL = [
   "createTransfer",
   "executeTransfer",
   "findCounterpartyBankByAccountId",
+  "findCounterpartyBankByShareToken",
   "getBankForLegacyTransfer",
   "getCounterpartyBankForLegacyTransfer",
   "getOwnedBankByDocumentId",

@@ -17,11 +17,12 @@ import { z } from "zod";
 import type { Actor } from "../auth/actor";
 import { createDwollaTransfer } from "../server/dwolla";
 import {
-  findCounterpartyBankByAccountId,
+  findCounterpartyBankByShareToken,
   getOwnedBankByDocumentId,
 } from "../repositories/banks.repository";
 import { NotFoundError } from "../repositories/errors";
 import { isPositive, tryParseUsd, type Money } from "../domain/money";
+import { isShareToken } from "../domain/share-token";
 // THE ONE PERMITTED CROSSING from a request path into lib/db. The
 // import-boundary suite names this file explicitly; a second crossing is a
 // milestone decision, not a refactor.
@@ -178,20 +179,6 @@ export class TransferSubmittedButNotRecordedError extends Error {
   }
 }
 
-/** Decode the recipient reference without throwing on malformed input. */
-function decodeRecipientReference(reference: string): string | null {
-  try {
-    // The shareable id is base64 of the Plaid account id. That is ADDRESSING
-    // AND ENCODING, not encryption — anyone can decode one. Replacing it with
-    // an opaque reference is its own milestone.
-    const decoded = Buffer.from(reference, "base64").toString("utf8");
-    if (!decoded || !/^[\w-]+$/.test(decoded)) return null;
-    return decoded;
-  } catch {
-    return null;
-  }
-}
-
 /** Appwrite relationships read back as the related document. */
 function relatedUserId(value: unknown): string {
   if (typeof value === "string") return value;
@@ -237,18 +224,19 @@ export async function executeTransfer(
     throw new NotFoundError("Bank not found");
   }
 
-  // 3. resolve the recipient server-side. The browser never sees this record.
-  const recipientAccountId = decodeRecipientReference(intent.recipientReference);
-  if (!recipientAccountId) {
-    throw new InvalidTransferIntentError(["Recipient reference is not valid"]);
-  }
-
-  const recipientBank = await findCounterpartyBankByAccountId(recipientAccountId);
+  // 3. resolve the recipient server-side. Shape-check before querying, but use
+  //    the same result for malformed and unknown tokens so this is not an
+  //    existence oracle. The browser never sees the bank record.
+  const recipientBank = isShareToken(intent.recipientReference)
+    ? await findCounterpartyBankByShareToken(intent.recipientReference)
+    : null;
   if (!recipientBank) {
-    // Same response as a malformed reference: do not confirm whether a given
-    // reference corresponds to a real account.
+    // Identical response for malformed and unknown references: do not confirm
+    // whether a well-shaped token corresponds to a real account.
     throw new NotFoundError("Recipient not found");
   }
+
+  const recipientAccountId = recipientBank.accountId;
 
   if (recipientBank.$id === sourceBank.$id) {
     throw new InvalidTransferIntentError(["Cannot transfer to the same account"]);

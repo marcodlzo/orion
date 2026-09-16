@@ -31,7 +31,7 @@ const {
   accountGet,
   findUserByAuthId,
   getOwnedBankByDocumentId,
-  findCounterpartyBankByAccountId,
+  findCounterpartyBankByShareToken,
   createDwollaTransfer,
   findCustomerByAuthId,
   upsertBankingCustomer,
@@ -48,7 +48,7 @@ const {
   accountGet: vi.fn(),
   findUserByAuthId: vi.fn(),
   getOwnedBankByDocumentId: vi.fn(),
-  findCounterpartyBankByAccountId: vi.fn(),
+  findCounterpartyBankByShareToken: vi.fn(),
   createDwollaTransfer: vi.fn(),
   findCustomerByAuthId: vi.fn(),
   upsertBankingCustomer: vi.fn(),
@@ -110,7 +110,7 @@ vi.mock("../repositories/users.repository", () => ({
 }));
 vi.mock("../repositories/banks.repository", () => ({
   getOwnedBankByDocumentId,
-  findCounterpartyBankByAccountId,
+  findCounterpartyBankByShareToken,
   getOwnedBanks: vi.fn(),
   getOwnedBankByAccountId: vi.fn(),
   createBankForActor: vi.fn(),
@@ -177,7 +177,7 @@ const ALICE_BANK = {
   bankId: "plaid-item-alice",
   accessToken: "REDACTED-ALICE-ACCESS-TOKEN",
   fundingSourceUrl: "https://api-sandbox.dwolla.invalid/funding-sources/alice",
-  shareableId: "cGxhaWQtYWNjb3VudC1hbGljZQ==",
+  shareToken: "11111111111111111111111111111111",
 };
 
 const BOB_BANK = {
@@ -187,11 +187,11 @@ const BOB_BANK = {
   bankId: "plaid-item-bob",
   accessToken: "REDACTED-BOB-ACCESS-TOKEN",
   fundingSourceUrl: "https://api-sandbox.dwolla.invalid/funding-sources/bob",
-  shareableId: "cGxhaWQtYWNjb3VudC1ib2I=",
+  shareToken: "22222222222222222222222222222222",
 };
 
-/** base64 of "plaid-account-bob" — the reference Bob hands out. */
-const BOB_REFERENCE = Buffer.from(BOB_BANK.accountId).toString("base64");
+/** The unguessable reference Bob hands out. */
+const BOB_REFERENCE = BOB_BANK.shareToken;
 
 /** One per submission attempt; the browser resends it unchanged on retry. */
 const KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -215,7 +215,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   authenticateAlice();
   getOwnedBankByDocumentId.mockResolvedValue(ALICE_BANK);
-  findCounterpartyBankByAccountId.mockResolvedValue(BOB_BANK);
+  findCounterpartyBankByShareToken.mockResolvedValue(BOB_BANK);
   // Already enrolled, which is every call after a customer's first. Enrolment
   // itself — creating the row, and refusing a bridge that names a different
   // user document — is a property of a unique constraint and is proven against
@@ -264,7 +264,7 @@ describe("authentication", () => {
       UnauthorizedError
     );
     expect(getOwnedBankByDocumentId).not.toHaveBeenCalled();
-    expect(findCounterpartyBankByAccountId).not.toHaveBeenCalled();
+    expect(findCounterpartyBankByShareToken).not.toHaveBeenCalled();
     expect(createDwollaTransfer).not.toHaveBeenCalled();
   });
 });
@@ -291,23 +291,51 @@ describe("E. source ownership", () => {
 });
 
 describe("F. recipient reference validation", () => {
-  it("rejects a malformed reference without calling the provider", async () => {
-    await expect(
-      initiateTransfer({ ...VALID_INTENT, recipientReference: "!!!not-base64!!!" })
-    ).rejects.toBeInstanceOf(InvalidTransferIntentError);
+  it("resolves a transfer by the recipient's share token", async () => {
+    await initiateTransfer(VALID_INTENT);
 
+    expect(findCounterpartyBankByShareToken).toHaveBeenCalledOnce();
+    expect(findCounterpartyBankByShareToken).toHaveBeenCalledWith(BOB_REFERENCE);
+    expect(createDwollaTransfer).toHaveBeenCalledOnce();
+  });
+
+  it("does not resolve the raw Plaid account id or its old base64 encoding", async () => {
+    const oldBase64 = Buffer.from(BOB_BANK.accountId).toString("base64");
+
+    for (const reference of [BOB_BANK.accountId, oldBase64]) {
+      await expect(
+        initiateTransfer({ ...VALID_INTENT, recipientReference: reference })
+      ).rejects.toThrow("Recipient not found");
+    }
+
+    expect(findCounterpartyBankByShareToken).not.toHaveBeenCalled();
     expect(createDwollaTransfer).not.toHaveBeenCalled();
   });
 
-  it("raises NotFound when the reference resolves to no account", async () => {
-    findCounterpartyBankByAccountId.mockResolvedValue(null);
+  it("returns the identical error for an unknown token and a malformed token", async () => {
+    findCounterpartyBankByShareToken.mockResolvedValue(null);
 
-    await expect(initiateTransfer(VALID_INTENT)).rejects.toBeInstanceOf(NotFoundError);
+    const malformed = await initiateTransfer({
+      ...VALID_INTENT,
+      recipientReference: "not-a-token",
+    }).catch((error: unknown) => error);
+    const unknown = await initiateTransfer({
+      ...VALID_INTENT,
+      recipientReference: "0".repeat(32),
+    }).catch((error: unknown) => error);
+
+    expect(malformed).toBeInstanceOf(NotFoundError);
+    expect(unknown).toBeInstanceOf(NotFoundError);
+    if (!(malformed instanceof Error) || !(unknown instanceof Error)) {
+      throw new Error("Expected both recipient lookups to reject");
+    }
+    expect(malformed.message).toBe(unknown.message);
+    expect(findCounterpartyBankByShareToken).toHaveBeenCalledOnce();
     expect(createDwollaTransfer).not.toHaveBeenCalled();
   });
 
   it("refuses a transfer to the source account itself", async () => {
-    findCounterpartyBankByAccountId.mockResolvedValue(ALICE_BANK);
+    findCounterpartyBankByShareToken.mockResolvedValue(ALICE_BANK);
 
     await expect(initiateTransfer(VALID_INTENT)).rejects.toBeInstanceOf(
       InvalidTransferIntentError
@@ -840,7 +868,7 @@ describe("K. idempotency", () => {
     vi.clearAllMocks();
     authenticateAlice();
     getOwnedBankByDocumentId.mockResolvedValue(ALICE_BANK);
-    findCounterpartyBankByAccountId.mockResolvedValue(BOB_BANK);
+    findCounterpartyBankByShareToken.mockResolvedValue(BOB_BANK);
     // Already enrolled, which is every call after a customer's first. Enrolment
   // itself — creating the row, and refusing a bridge that names a different
   // user document — is a property of a unique constraint and is proven against

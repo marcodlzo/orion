@@ -59,7 +59,7 @@ declare type Account = {
   type: string;
   subtype: string;
   appwriteItemId: string;
-  shareableId: string;
+  shareToken: string;
 };
 
 declare type AccountBalanceSummary = {
@@ -95,7 +95,7 @@ declare type Bank = {
   accessToken: string;
   fundingSourceUrl: string;
   userId: string;
-  shareableId: string;
+  shareToken: string;
 };
 
 declare type AccountTypes =
@@ -318,7 +318,7 @@ declare interface createBankAccountProps {
   accountId: string;
   bankId: string;
   fundingSourceUrl: string;
-  shareableId: string;
+  shareToken: string;
 }
 
 declare interface getBanksProps {

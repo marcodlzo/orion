@@ -110,6 +110,7 @@ vi.mock("../repositories/users.repository", () => ({
 vi.mock("../repositories/banks.repository", () => ({
   createBankForActor,
   findCounterpartyBankByAccountId: vi.fn().mockResolvedValue(null),
+  findCounterpartyBankByShareToken: vi.fn().mockResolvedValue(null),
   getOwnedBankByDocumentId: vi.fn().mockResolvedValue(null),
   getOwnedBanks: vi.fn().mockResolvedValue([]),
 }));

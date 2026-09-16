@@ -36,7 +36,6 @@ const SOURCE_BANK: BankRecord = {
   bankId: "item-source",
   accessToken: "access-source",
   fundingSourceUrl: "https://api-sandbox.dwolla.invalid/funding-sources/source",
-  shareableId: "c2hhcmUtc291cmNl",
   shareToken: "11111111111111111111111111111111",
   userId: { $id: ACTOR.userId },
 };
@@ -47,7 +46,6 @@ const RECIPIENT_BANK: BankRecord = {
   bankId: "item-recipient",
   accessToken: "access-recipient",
   fundingSourceUrl: "https://api-sandbox.dwolla.invalid/funding-sources/dest",
-  shareableId: "c2hhcmUtcmVjaXBpZW50",
   shareToken: "22222222222222222222222222222222",
   userId: { $id: "userdoc-recipient" },
 };
@@ -62,13 +60,13 @@ const RECIPIENT_BANK: BankRecord = {
  */
 const stub = vi.hoisted(() => ({
   getOwnedBankByDocumentId: vi.fn(),
-  findCounterpartyBankByAccountId: vi.fn(),
+  findCounterpartyBankByShareToken: vi.fn(),
   createDwollaTransfer: vi.fn(),
 }));
 
 vi.mock("../repositories/banks.repository", () => ({
   getOwnedBankByDocumentId: stub.getOwnedBankByDocumentId,
-  findCounterpartyBankByAccountId: stub.findCounterpartyBankByAccountId,
+  findCounterpartyBankByShareToken: stub.findCounterpartyBankByShareToken,
 }));
 
 vi.mock("../server/dwolla", () => ({
@@ -103,7 +101,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
 
   stub.getOwnedBankByDocumentId.mockResolvedValue(SOURCE_BANK);
-  stub.findCounterpartyBankByAccountId.mockResolvedValue(RECIPIENT_BANK);
+  stub.findCounterpartyBankByShareToken.mockResolvedValue(RECIPIENT_BANK);
   // Re-armed per test, not set once: clearAllMocks drops implementations set
   // through mockResolvedValue, and a stub returning undefined would fail these
   // tests somewhere unrelated to what they assert.
@@ -122,8 +120,8 @@ const nextKey = () => {
   return `22222222-2222-4222-8222-${String(keySeq).padStart(12, "0")}`;
 };
 
-/** The reference a sender pastes: base64 of the recipient's account id. */
-const reference = Buffer.from(RECIPIENT_BANK.accountId).toString("base64");
+/** The unguessable reference a recipient hands to a sender. */
+const reference = RECIPIENT_BANK.shareToken;
 
 function intent(over: Record<string, unknown> = {}) {
   return {

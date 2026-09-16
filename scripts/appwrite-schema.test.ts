@@ -11,7 +11,7 @@ import {
 } from "./appwrite-schema";
 
 describe("Appwrite schema contract", () => {
-  it("contains the exact 25 runtime attributes with no duplicate keys", () => {
+  it("contains the exact 24 runtime attributes with no duplicate keys", () => {
     expect(
       APPWRITE_SCHEMA.map((collection) => [
         collection.name,
@@ -40,7 +40,6 @@ describe("Appwrite schema contract", () => {
           "accountId",
           "accessToken",
           "fundingSourceUrl",
-          "shareableId",
           "userId",
         ],
       ],
@@ -61,7 +60,7 @@ describe("Appwrite schema contract", () => {
     ]);
 
     const attributes = APPWRITE_SCHEMA.flatMap(({ attributes }) => attributes);
-    expect(attributes).toHaveLength(25);
+    expect(attributes).toHaveLength(24);
   });
 
   it("reserves 512 characters for both encrypted provider fields", () => {

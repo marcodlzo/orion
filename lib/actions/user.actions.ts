@@ -28,7 +28,7 @@ import {
 
 import { createSessionClient } from "../appwrite";
 import { plaidClient } from '@/lib/plaid';
-import { encryptId, extractCustomerIdFromUrl, parseStringify } from "../utils";
+import { extractCustomerIdFromUrl, parseStringify } from "../utils";
 import {
   addFundingSource,
   createDwollaCustomer,
@@ -46,7 +46,6 @@ import {
   createUserRecord,
   findUserByAuthId,
 } from "../repositories/users.repository";
-import { createBankForActor } from "../repositories/banks.repository";
 import { toCurrentUserDTO } from "../dto/user.dto";
 import {
   clientAddress,
@@ -350,7 +349,6 @@ export const exchangePublicToken = async ({
           accountId: accountData.account_id,
           accessToken,
           fundingSourceUrl,
-          shareableId: encryptId(accountData.account_id),
         }, {
           displayName: accountData.name,
           officialName: accountData.official_name,

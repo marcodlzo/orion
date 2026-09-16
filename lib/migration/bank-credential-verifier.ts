@@ -13,10 +13,10 @@ export async function verifyBankCredentialCutover(): Promise<{ checked: number }
     for (const bank of source.documents) {
       const { rows } = await client.query<{
         credential_id: string; access_token: string; funding_source_url: string;
-        provider_item_id: string | null; shareable_id: string | null;
+        provider_item_id: string | null;
       }>(
         `SELECT k.id AS credential_id, k.access_token, k.funding_source_url,
-                a.provider_item_id, a.shareable_id
+                a.provider_item_id
            FROM linked_accounts a
            JOIN linked_account_credentials k ON k.linked_account_id = a.id
           WHERE a.legacy_appwrite_bank_document_id = $1`,
@@ -24,7 +24,7 @@ export async function verifyBankCredentialCutover(): Promise<{ checked: number }
       );
       const row = rows[0];
       if (!row) throw new Error(`Missing credential target for legacy bank ${bank.$id}`);
-      if (row.provider_item_id !== bank.bankId || row.shareable_id !== bank.shareableId) {
+      if (row.provider_item_id !== bank.bankId) {
         throw new Error(`Metadata verification failed for legacy bank ${bank.$id}`);
       }
       const compare = (field: "accessToken" | "fundingSourceUrl", target: string) => {

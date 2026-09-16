@@ -76,6 +76,7 @@ vi.mock("../repositories/banks.repository", () => ({
   createBankForActor: vi.fn(),
   getOwnedBankByDocumentId: vi.fn(),
   findCounterpartyBankByAccountId: vi.fn(),
+  findCounterpartyBankByShareToken: vi.fn(),
   getOwnedBanks: vi.fn(),
   getOwnedBankByAccountId: vi.fn(),
 }));

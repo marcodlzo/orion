@@ -48,12 +48,6 @@ export type BankRecord = {
   bankId: string;
   accessToken: string;
   fundingSourceUrl: string;
-  shareableId: string;
-  /**
-   * The unguessable recipient reference. Lands beside `shareableId`, which is
-   * base64 of the Plaid account id and is being retired; both are populated
-   * until the transfer path cuts over.
-   */
   shareToken: string;
   userId: unknown;
 } & Record<string, unknown>;
@@ -71,7 +65,6 @@ function decryptBankRecord(row: StoredBankRow): BankRecord {
       recordId: row.credential_id,
       field: "fundingSourceUrl",
     }),
-    shareableId: row.shareable_id,
     shareToken: row.share_token,
     userId: { $id: row.owner_user_document_id },
   };
@@ -191,7 +184,6 @@ export async function createBankForActor(
     accountId: string;
     accessToken: string;
     fundingSourceUrl: string;
-    shareableId: string;
     displayName: string;
     officialName: string | null;
     mask: string | null;

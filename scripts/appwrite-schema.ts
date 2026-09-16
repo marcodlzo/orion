@@ -115,7 +115,6 @@ export const APPWRITE_SCHEMA: readonly CollectionSpec[] = [
       string("accountId", 128),
       string("accessToken", 512),
       string("fundingSourceUrl", 512),
-      string("shareableId", 256),
       {
         kind: "relationship",
         key: "userId",

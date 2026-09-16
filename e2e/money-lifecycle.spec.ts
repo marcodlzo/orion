@@ -117,11 +117,11 @@ async function ownedBanks() {
     public_id: string;
     external_account_id: string;
     provider_item_id: string | null;
-    shareable_id: string | null;
+    share_token: string;
     display_name: string;
   }>(
     `SELECT COALESCE(a.legacy_appwrite_bank_document_id, a.id::text) AS public_id,
-            a.external_account_id, a.provider_item_id, a.shareable_id, a.display_name
+            a.external_account_id, a.provider_item_id, a.share_token, a.display_name
        FROM linked_accounts a
        JOIN banking_customers c ON c.id = a.customer_id
       WHERE c.appwrite_user_document_id = $1
@@ -133,7 +133,7 @@ async function ownedBanks() {
     $id: row.public_id,
     accountId: row.external_account_id,
     bankId: row.provider_item_id ?? "",
-    shareableId: row.shareable_id ?? "",
+    shareToken: row.share_token,
     displayName: row.display_name,
   }));
 }
@@ -283,7 +283,7 @@ test("transfer form creates exactly one durable transfer, hold, and provider ref
   await page.getByRole("option").first().click();
   await page.getByPlaceholder("Write a short note here").fill("Lifecycle sandbox test");
   await page.getByPlaceholder("ex: johndoe@gmail.com").fill(email);
-  await page.getByPlaceholder("Enter the public account number").fill(banks[1].shareableId);
+  await page.getByPlaceholder("Enter the public account number").fill(banks[1].shareToken);
   await page.getByPlaceholder("ex: 5.00").fill("0.01");
   const isTransfer = (request: Request) => request.method() === "POST" &&
     Boolean(request.headers()["next-action"]) && Boolean(request.postData()?.includes("idempotencyKey"));

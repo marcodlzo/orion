@@ -24,7 +24,6 @@ const INPUT = {
   accountId: "acct-alice",
   accessToken: "provider-credential-under-test",
   fundingSourceUrl: "https://funding.example.invalid/sources/1",
-  shareableId: "YWNjdC1hbGljZQ==",
 };
 
 const METADATA: LinkedAccountMetadata = {
@@ -70,7 +69,7 @@ describe("minting a share token when a bank is linked", () => {
     const first = await linkBankForActor(ALICE, INPUT, METADATA);
     const second = await linkBankForActor(
       BOB,
-      { ...INPUT, bankId: "item-bob", accountId: "acct-bob", shareableId: "YWNjdC1ib2I=" },
+      { ...INPUT, bankId: "item-bob", accountId: "acct-bob" },
       METADATA
     );
 
@@ -93,17 +92,20 @@ describe("minting a share token when a bank is linked", () => {
     expect(Buffer.from(bank.shareToken, "hex").toString("utf8")).not.toContain("acct");
   });
 
-  it("keeps the legacy reference untouched, so the transfer path still resolves", async () => {
-    // Part one lands BESIDE the old column. Rotating `shareable_id` here would
-    // break every transfer until the cutover commit.
-    const bank = await linkBankForActor(ALICE, INPUT, METADATA);
+  it("does not retain the reversible legacy recipient-reference column", async () => {
+    await linkBankForActor(ALICE, INPUT, METADATA);
 
-    const { rows } = await query<{ shareable_id: string }>(
-      `SELECT shareable_id FROM linked_accounts`
+    const { rows } = await query<{ column_name: string }>(
+      `SELECT column_name
+         FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'linked_accounts'
+          AND column_name = 'shareable_id'`
     );
-    expect(rows[0].shareable_id).toBe(INPUT.shareableId);
-    expect(bank.shareableId).toBe(INPUT.shareableId);
+
+    expect(rows).toEqual([]);
   });
+
 });
 
 describe("resolving a recipient by share token", () => {
@@ -111,7 +113,7 @@ describe("resolving a recipient by share token", () => {
     await linkBankForActor(ALICE, INPUT, METADATA);
     const bob = await linkBankForActor(
       BOB,
-      { ...INPUT, bankId: "item-bob", accountId: "acct-bob", shareableId: "YWNjdC1ib2I=" },
+      { ...INPUT, bankId: "item-bob", accountId: "acct-bob" },
       METADATA
     );
 
@@ -145,7 +147,11 @@ describe("resolving a recipient by share token", () => {
     await linkBankForActor(ALICE, INPUT, METADATA);
 
     expect(await findCounterpartyBankByShareToken(INPUT.accountId)).toBeNull();
-    expect(await findCounterpartyBankByShareToken(INPUT.shareableId)).toBeNull();
+    expect(
+      await findCounterpartyBankByShareToken(
+        Buffer.from(INPUT.accountId).toString("base64")
+      )
+    ).toBeNull();
     expect(await findCounterpartyBankByShareToken("")).toBeNull();
   });
 });
@@ -155,7 +161,7 @@ describe("what the schema refuses", () => {
     const alice = await linkBankForActor(ALICE, INPUT, METADATA);
     const bob = await linkBankForActor(
       BOB,
-      { ...INPUT, bankId: "item-bob", accountId: "acct-bob", shareableId: "YWNjdC1ib2I=" },
+      { ...INPUT, bankId: "item-bob", accountId: "acct-bob" },
       METADATA
     );
 
