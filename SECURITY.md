@@ -69,6 +69,7 @@ regressed. Nothing here is claimed on the strength of a code reading alone.
 | Money was a float through the entire display path, so a rendered column did not sum to the stored total | Milestone 11 | `formatAmount(amount: number)` is deleted. Balances and transaction amounts are exact integer minor units to the point of display, and `formatMinorUnits` REFUSES a float rather than rounding it. `money.test.ts` |
 | Plaid was called during SSR, so a page render drove provider sync | Milestone 11 | History reads the synced store. An architecture test asserts no render path reaches any sync module, and that the request-reachable read module contains no write — the half that advances a cursor stays operator-only. |
 | Account linking discarded every account on an Item but the first | Milestone 11 | Every depository account gets its own funding source and bank record. Non-depository accounts are skipped deliberately and counted, and one account's failure no longer blocks the rest. |
+| `shareableId` was base64 encoding presented as encryption, exposing the Plaid account id and allowing anyone who knew it to compute a recipient reference | `fe68f9e`, `85d6f25` | A fresh 128-bit share token is minted at the storage boundary, and transfers resolve only through it. Raw account ids and their old base64 encodings do not resolve; malformed and unknown tokens return the identical error. The old codec and column are gone. `lib/domain/share-token.test.ts`, `lib/repositories/share-token.db.test.ts`, `lib/actions/transfer.test.ts`, `components/PaymentTransferForm.test.tsx` |
 | `transactionsSync` called with no cursor inside `while (has_more)` — an infinite loop against a paid API | Milestone 10 | The loop is a pure engine: the cursor is sent, advanced and returned, and an unchanged cursor with more pages promised ABORTS instead of looping. A bounded page ceiling backstops a provider that advances forever. `engine.test.ts` |
 | Sync pages overwrote each other, and `modified`/`removed` were ignored | Milestone 10 | All three change lists accumulate across pages and are folded into a net effect per transaction, so an add-then-remove within one run does not depend on the applier's ordering. Modifications update; removals soft-delete. `plaid-sync.db.test.ts` |
 | No cursor was persisted, so every call re-fetched an item's entire history | Milestone 10 | The cursor and the transactions it produced are written in ONE transaction — asserted by inducing a failure between them and checking neither landed and the cursor stayed put. Cursor-first loses data permanently; data-first reprocesses. |
@@ -83,12 +84,8 @@ after someone added a new sensitive column.
 
 ## Known unfixed vulnerabilities
 
-These are documented, scheduled, and deliberately not fixed opportunistically.
-They are real, and this application should not be exposed to untrusted users.
-
-| Finding | Severity | Milestone |
-|---|---|---|
-| `shareableId` is base64 encoding presented as encryption | Medium | unscheduled |
+No findings remain open in this register. This statement describes the tracked
+audit list; it is not a claim that the sandbox project is production-ready.
 
 END-TO-END TESTS HAVE LEFT THIS TABLE. Six Playwright tests drive a real
 browser against real Appwrite, the Plaid Link sandbox, the Dwolla sandbox and
@@ -124,10 +121,11 @@ is distinguishable by transaction kind.
 The credit allowance is deliberately unchanged and still separately labelled. It
 is not cash.
 
-One row reads **unscheduled**, and that is a correction rather than a
-demotion: rate limiting and `shareableId` were tagged to Milestone 2, which
-closed without them. A finding pointing at a completed milestone is how work
-quietly disappears, so they are named as unowned until something claims them.
+SHARE TOKENS HAVE LEFT THIS TABLE. `fe68f9e` landed a random token beside the
+legacy value so every intermediate commit remained usable; `85d6f25` cut the
+transfer path and UI over, removed the reversible codec, and dropped the old
+column. The two-commit sequence matters: rotating the value before its consumer
+changed would have broken every recipient reference between deployments.
 
 RATE LIMITING HAS LEFT THIS TABLE. `signIn`, `signUp`, `initiateTransfer`,
 `createLinkToken` and `exchangePublicToken` consume a PostgreSQL-backed counter

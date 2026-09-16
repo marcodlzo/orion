@@ -181,9 +181,7 @@ Ordered by what unblocks the most.
    version-specific path inside `next/dist` — fix the path when it moves, and
    never replace `cache()` with a stub, because that suite exists to prove
    memoisation is scoped to one request.
-5. **`shareableId` is base64** of the Plaid account id. The last open finding.
-   Nothing should depend on its secrecy.
-6. **The reconciliation drift is deliberate.** `internal=settled,
+5. **The reconciliation drift is deliberate.** `internal=settled,
    provider=pending`, because settlement was driven by a locally injected event.
    Leave it until a transfer settles for real.
 
