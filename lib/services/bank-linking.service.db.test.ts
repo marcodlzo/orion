@@ -91,9 +91,40 @@ describe("linking a bank in PostgreSQL", () => {
     expect(credentialColumns).toEqual(
       expect.arrayContaining(["linked_account_id", "access_token", "funding_source_url"])
     );
-    expect(metadataColumns.filter((name) =>
-      /credential|token|secret|funding_source/.test(name)
-    )).toEqual([]);
+
+    // PINNED EXACTLY, rather than matched against /credential|token|secret/.
+    //
+    // The pattern was a proxy for "is this a provider credential", and it
+    // misfired on `share_token` — a recipient reference, which is the opposite
+    // of a credential: it exists to be handed out, and holding one lets
+    // somebody pay this account and nothing else.
+    //
+    // Loosening the pattern to let it through would have weakened the check for
+    // every future column too. An exact list is stronger than the heuristic it
+    // replaces: ANY new column fails here, credential-shaped or not, so adding
+    // one is a decision somebody makes on purpose rather than a regex's opinion.
+    expect([...metadataColumns].sort()).toEqual([
+      "account_subtype",
+      "account_type",
+      "created_at",
+      "currency",
+      "customer_id",
+      "display_name",
+      "external_account_id",
+      "id",
+      "legacy_appwrite_bank_document_id",
+      "mask",
+      "official_name",
+      "provider",
+      "provider_item_id",
+      "share_token",
+      "shareable_id",
+      "updated_at",
+    ]);
+
+    // The specific thing the old pattern was defending, stated directly.
+    expect(metadataColumns).not.toContain("access_token");
+    expect(metadataColumns).not.toContain("funding_source_url");
   });
 
   it("does not duplicate the bank when the same account is linked again", async () => {

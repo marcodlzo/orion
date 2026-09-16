@@ -29,11 +29,13 @@ import type { Actor } from "../auth/actor";
 import { InfrastructureError } from "../auth/errors";
 import { decryptCredential, encryptCredential } from "../crypto/envelope";
 import { withTransaction } from "../db/pool";
+import { newShareToken } from "../domain/share-token";
 import { ensureBankingCustomer } from "../db/repositories/banking-customers.repository";
 import {
   findOwnedStoredBankByAccountId,
   findOwnedStoredBankByPublicId,
   findStoredCounterpartyByAccountId,
+  findStoredCounterpartyByShareToken,
   insertStoredBank,
   listAllStoredBanks,
   listOwnedStoredBanks,
@@ -47,6 +49,12 @@ export type BankRecord = {
   accessToken: string;
   fundingSourceUrl: string;
   shareableId: string;
+  /**
+   * The unguessable recipient reference. Lands beside `shareableId`, which is
+   * base64 of the Plaid account id and is being retired; both are populated
+   * until the transfer path cuts over.
+   */
+  shareToken: string;
   userId: unknown;
 } & Record<string, unknown>;
 
@@ -64,6 +72,7 @@ function decryptBankRecord(row: StoredBankRow): BankRecord {
       field: "fundingSourceUrl",
     }),
     shareableId: row.shareable_id,
+    shareToken: row.share_token,
     userId: { $id: row.owner_user_document_id },
   };
 }
@@ -139,6 +148,29 @@ export async function getOwnedBankByAccountId(
   }
 }
 
+/**
+ * Resolve a recipient from their share token.
+ *
+ * The replacement for `findCounterpartyBankByAccountId` on the transfer path.
+ * That one takes the Plaid account id, which the old base64 reference handed
+ * out to anyone who could decode it; this one takes a value that reveals
+ * nothing and cannot be derived.
+ *
+ * Unowned, like its predecessor and for the same reason: being payable by a
+ * stranger is the feature. The transfer's authorization is on the source side.
+ */
+export async function findCounterpartyBankByShareToken(
+  shareToken: string
+): Promise<BankRecord | null> {
+  if (!shareToken) return null;
+  try {
+    const row = await findStoredCounterpartyByShareToken(shareToken);
+    return row ? decryptBankRecord(row) : null;
+  } catch (error) {
+    throw new InfrastructureError("Failed to resolve the counterparty bank", { cause: error });
+  }
+}
+
 /** Counterparty lookup is intentionally unowned; ambiguous ids resolve null. */
 export async function findCounterpartyBankByAccountId(
   accountId: string
@@ -169,6 +201,18 @@ export async function createBankForActor(
 ): Promise<BankRecord> {
   const linkedAccountId = randomUUID();
   const credentialId = randomUUID();
+  /**
+   * MINTED HERE, AND NOT ACCEPTED FROM A CALLER.
+   *
+   * `shareToken` is deliberately absent from the input type above, so there is
+   * no parameter through which a caller could supply one. A share token that
+   * arrived from the browser would let somebody choose their own reference —
+   * planting a predictable one, or claiming a value already handed out — and
+   * `exchangePublicToken` is a public POST endpoint whose body is attacker
+   * controlled. The same reasoning that keeps identity out of the parameters
+   * keeps this out of them.
+   */
+  const shareToken = newShareToken();
 
   try {
     return await withTransaction(async (client) => {
@@ -180,6 +224,7 @@ export async function createBankForActor(
         {
           ...input,
           itemId: input.bankId,
+          shareToken,
           linkedAccountId,
           credentialId,
           customerId: customer.id,

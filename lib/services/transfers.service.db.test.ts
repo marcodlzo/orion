@@ -37,6 +37,7 @@ const SOURCE_BANK: BankRecord = {
   accessToken: "access-source",
   fundingSourceUrl: "https://api-sandbox.dwolla.invalid/funding-sources/source",
   shareableId: "c2hhcmUtc291cmNl",
+  shareToken: "11111111111111111111111111111111",
   userId: { $id: ACTOR.userId },
 };
 
@@ -47,6 +48,7 @@ const RECIPIENT_BANK: BankRecord = {
   accessToken: "access-recipient",
   fundingSourceUrl: "https://api-sandbox.dwolla.invalid/funding-sources/dest",
   shareableId: "c2hhcmUtcmVjaXBpZW50",
+  shareToken: "22222222222222222222222222222222",
   userId: { $id: "userdoc-recipient" },
 };
 

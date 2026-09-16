@@ -14,6 +14,7 @@ export type StoredBankRow = {
   external_account_id: string;
   provider_item_id: string;
   shareable_id: string;
+  share_token: string;
   access_token: string;
   funding_source_url: string;
 };
@@ -40,6 +41,7 @@ const SELECT = `SELECT
   a.external_account_id,
   a.provider_item_id,
   a.shareable_id,
+  a.share_token,
   k.access_token,
   k.funding_source_url
 FROM linked_accounts a
@@ -104,6 +106,32 @@ export async function findOwnedStoredBankByAccountId(
   return rows[0] ?? null;
 }
 
+/**
+ * Resolve a recipient from the reference they handed out.
+ *
+ * ONE indexed equality on an unguessable value, replacing decode-then-search.
+ * The token says nothing about the account, so a caller holding one learns only
+ * that somebody can be paid at it — never the Plaid account id behind it.
+ *
+ * Unowned on purpose: the whole point of a share reference is that a stranger
+ * can pay you. Authorization for the transfer is the SOURCE side, where
+ * ownership is part of the query.
+ *
+ * `LIMIT 2` then "exactly one" mirrors the account-id lookup: the unique index
+ * should make a second row impossible, and if one ever exists this resolves to
+ * null rather than silently picking a recipient.
+ */
+export async function findStoredCounterpartyByShareToken(
+  shareToken: string
+): Promise<StoredBankRow | null> {
+  const { rows } = await run<StoredBankRow>(
+    undefined,
+    `${SELECT} WHERE a.share_token = $1 ORDER BY a.id LIMIT 2`,
+    [shareToken]
+  );
+  return rows.length === 1 ? rows[0] : null;
+}
+
 export async function findStoredCounterpartyByAccountId(
   accountId: string
 ): Promise<StoredBankRow | null> {
@@ -123,6 +151,7 @@ export async function insertStoredBank(
     accountId: string;
     itemId: string;
     shareableId: string;
+    shareToken: string;
     accessToken: string;
     fundingSourceUrl: string;
     displayName: string;
@@ -137,13 +166,13 @@ export async function insertStoredBank(
     client,
     `INSERT INTO linked_accounts (
        id, customer_id, legacy_appwrite_bank_document_id, external_account_id,
-       provider, provider_item_id, shareable_id, display_name, official_name,
-       mask, account_type, account_subtype, currency
-     ) VALUES ($1, $2, NULL, $3, 'plaid', $4, $5, $6, $7, $8, $9, $10, 'USD')`,
+       provider, provider_item_id, shareable_id, share_token, display_name,
+       official_name, mask, account_type, account_subtype, currency
+     ) VALUES ($1, $2, NULL, $3, 'plaid', $4, $5, $6, $7, $8, $9, $10, $11, 'USD')`,
     [
       input.linkedAccountId, input.customerId, input.accountId, input.itemId,
-      input.shareableId, input.displayName, input.officialName, input.mask,
-      input.accountType, input.accountSubtype,
+      input.shareableId, input.shareToken, input.displayName, input.officialName,
+      input.mask, input.accountType, input.accountSubtype,
     ]
   );
   await run(
