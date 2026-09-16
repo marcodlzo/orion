@@ -62,6 +62,37 @@ jobs:
       CREDENTIAL_ENCRYPTION_KEYS: ${{ secrets.CREDENTIAL_ENCRYPTION_KEYS }}
       CREDENTIAL_ENCRYPTION_ACTIVE_KEY_ID: ${{ secrets.CREDENTIAL_ENCRYPTION_ACTIVE_KEY_ID }}
     steps:
+      # FIRST, before anything expensive. Without this the job spends two
+      # minutes on npm ci, a Chromium download and a production build, and then
+      # dies on `E2E requires NEXT_APPWRITE_KEY` — which reads like a code
+      # failure and names only the first missing value, so configuring them is
+      # one round trip per secret.
+      #
+      # It REFUSES rather than skipping. A scheduled suite that quietly does
+      # nothing when it is misconfigured is the same failure as a rate limiter
+      # that silently stops counting: the signal keeps arriving green and
+      # nobody learns the control stopped applying.
+      - name: Require the sandbox-e2e secrets
+        id: preflight
+        run: |
+          missing=()
+          for name in NEXT_PUBLIC_APPWRITE_ENDPOINT NEXT_PUBLIC_APPWRITE_PROJECT \
+                      NEXT_APPWRITE_KEY APPWRITE_DATABASE_ID \
+                      APPWRITE_USER_COLLECTION_ID APPWRITE_BANK_COLLECTION_ID \
+                      APPWRITE_TRANSACTION_COLLECTION_ID \
+                      PLAID_CLIENT_ID PLAID_SECRET DWOLLA_KEY DWOLLA_SECRET \
+                      CREDENTIAL_ENCRYPTION_KEYS CREDENTIAL_ENCRYPTION_ACTIVE_KEY_ID; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ ${#missing[@]} -ne 0 ]; then
+            # Names only. These are the names of secrets, never their values.
+            echo "::error::The sandbox-e2e environment is missing ${#missing[@]} secret(s): ${missing[*]}"
+            echo "The browser suite cannot run. Set them on the sandbox-e2e" >&2
+            echo "environment, not at repository scope." >&2
+            exit 1
+          fi
+          echo "all 13 sandbox-e2e secrets are present"
+
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -79,14 +110,20 @@ jobs:
       #
       # The suite tears down after itself too; this is the backstop for the runs
       # that do not reach their own teardown.
+      #
+      # Gated on the preflight rather than plain `always()`. If the secrets are
+      # absent the suite never connected to anything, so there is no residue to
+      # sweep — but the sweep would still fail, and it fails with "residue
+      # survived", which is a false statement about the state of the Appwrite
+      # project. One real error beats three, two of which are wrong.
       - name: Sweep end-to-end residue
-        if: always()
+        if: always() && steps.preflight.outcome == 'success'
         run: npm run e2e:cleanup:commit
 
       # Fail the job if anything survived the sweep, rather than reporting clean
       # and leaving it for somebody to find in a backfill dry run months later.
       - name: Assert no residue survived
-        if: always()
+        if: always() && steps.preflight.outcome == 'success'
         run: |
           output="$(npm run e2e:cleanup --silent)"
           echo "$output"
