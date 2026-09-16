@@ -223,7 +223,7 @@ const PaymentTransferForm = ({ accounts }: PaymentTransferFormProps) => {
                 <div className="flex w-full flex-col">
                   <FormControl>
                     <Input
-                      placeholder="Enter the public account number"
+                      placeholder="The 32-character token the recipient shared"
                       className="input-class"
                       {...field}
                     />

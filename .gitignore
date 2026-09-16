@@ -110,3 +110,9 @@ Desktop.ini
 *.tgz
 .cache/
 .turbo/
+
+# Playwright MCP writes page snapshots and console logs here while driving the
+# app. They are captured from a SIGNED-IN session, so they hold whatever was on
+# screen — balances, recipient references, account masks. Debugging output, not
+# artefacts, and never something to commit.
+.playwright-mcp/
